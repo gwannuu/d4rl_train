@@ -1,0 +1,14 @@
+[project]
+name = "train-d4rl"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "cython<3",
+    "d4rl>=1.1",
+    "distrax>=0.1.5",
+    "flax>=0.10.7",
+    "gym==0.23.1",
+    "numpy>=2",
+]
