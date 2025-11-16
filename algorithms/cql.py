@@ -39,7 +39,7 @@ class Config:
     # Train
     seed: int = 4212
     num_critics: int = 2
-    num_updates: int = 10_000_000
+    num_updates: int = 5_000_000
     polyak_step_size: float = 0.005
     batch_size: int = 256
     gamma: float = 0.99
@@ -51,15 +51,15 @@ class Config:
 
     # Eval
     eval_workers: int = 8
-    eval_interval: int = 10_000
+    eval_interval: int = 50_000
 
     # Logging
     log: bool = True
-    train_log_interval: int = 2_500
+    train_log_interval: int = 10_000
 
     # Model Save
     save: bool = True
-    model_save_interval: int = 100_000
+    model_save_interval: int = 250_000
 
 
 Models = namedtuple("Models", "actor vec_q vec_q_target alpha")
