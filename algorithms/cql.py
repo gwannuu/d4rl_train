@@ -30,6 +30,7 @@ wandb_notes: str = "first running"
 wandb_tags: list[str] = ["cql"]
 wandb_project: str = "d4rl_train"
 wandb_group_id: str = "cql_0"
+machine_name: str = os.environ["MACHINE_NAME"]
 
 
 @dataclass(frozen=True)
@@ -543,13 +544,15 @@ def log_obj_stats(
 
 def extract_experiment_metadata():
     global wandb_tags
+    global machine_name
     config = Config()
     git_hash = get_git_hash(length=12)
     wandb_tags.append(git_hash)
     wandb_config = dataclasses.asdict(config)
     wandb_config["metadata"] = {
         "git_hash": git_hash,
-        "host": socket.gethostname(),
+        # "host": socket.gethostname(),
+        "machine_name": machine_name,
         "username": getpass.getuser(),
         # "mac_address": uuid.getnode(),
     }
