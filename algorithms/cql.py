@@ -29,6 +29,7 @@ from utils.jax import restore_state, save_state
 wandb_notes: str = "first running"
 wandb_tags: list[str] = ["cql"]
 wandb_project: str = "d4rl_train"
+wandb_group_id: str = "cql_0"
 
 
 @dataclass(frozen=True)
@@ -213,7 +214,7 @@ class TanhGaussianPolicy(nnx.Module):
         return pi
 
 
-def restore_ckpt(wandb_run_id, models, opts, wandb_run):
+def restore_ckpt(wandb_run_id, models, opts, wandb_run, checkpointer):
     print(f"--- Resuming W&B Run '{wandb_run_id}' ... ---")
     artifact = wandb_run.use_artifact(f"{wandb_run_id}:latest")
     step = artifact.metadata["step"]
@@ -443,7 +444,7 @@ def train_batch(
 
 
 def evaluate_policy(
-    env: vector.VectorEnv, actor: TanhGaussianPolicy, num_episodes: int
+    config: Config, env: vector.VectorEnv, actor: TanhGaussianPolicy, num_episodes: int
 ):
     # Run episodes in the vectorized env using the deterministic policy (tanh(mean))
     obs = env.reset()
@@ -473,12 +474,13 @@ def evaluate_policy(
 
 
 def evaluate(
+    config: Config,
     models: Models,
     env: vector.VectorEnv,
     step: int,
     wandb_run: wandb.Run | None = None,
 ):
-    eval_metrics = evaluate_policy(env, models.actor, num_episodes=env.num_envs)
+    eval_metrics = evaluate_policy(config, env, models.actor, num_episodes=env.num_envs)
 
     log_data = {f"valid/{k}": float(v) for k, v in eval_metrics._asdict().items()}
     if wandb_run is not None:
@@ -539,11 +541,9 @@ def log_obj_stats(
         wandb_run.log(stats, step=step)
 
 
-if __name__ == "__main__":
+def extract_experiment_metadata():
+    global wandb_tags
     config = Config()
-    random.seed(config.seed)
-    np.random.seed(config.seed)
-
     git_hash = get_git_hash(length=12)
     wandb_tags.append(git_hash)
     wandb_config = dataclasses.asdict(config)
@@ -555,6 +555,12 @@ if __name__ == "__main__":
     }
 
     exp_hash = generate_experiment_hash(config_dict=wandb_config, length=12)
+
+    return config, wandb_config, exp_hash
+
+
+def main(sweep=False):
+    config, wandb_config, exp_hash = extract_experiment_metadata()
 
     wandb_run = None
     if config.log:
@@ -570,14 +576,20 @@ if __name__ == "__main__":
                 save_code=True,
                 disable_git=False,
             ),
-            group=config.dataset,
+            group=None if sweep else wandb_group_id,
             # id=wandb_run_id,
         )
 
     if wandb_run:
+        if wandb_run.sweep_id:
+            valid_keys = {f.name for f in dataclasses.fields(Config)}
+            run_params = {k: v for k, v in wandb_run.config.items() if k in valid_keys}
+            config = Config(**run_params)
         save_root_dir = Path.cwd() / f"ckpt/cql/{wandb_run.id}"
     else:
         save_root_dir = Path.cwd() / f"ckpt/cql/{exp_hash}"
+    random.seed(config.seed)
+    np.random.seed(config.seed)
     Path.mkdir(save_root_dir, exist_ok=True, parents=True)
     checkpointer = ocp.StandardCheckpointer()
 
@@ -605,7 +617,9 @@ if __name__ == "__main__":
 
     while step < config.num_updates:
         if step % config.eval_interval == 0:
-            evaluate(models=models, env=env, step=step, wandb_run=wandb_run)
+            evaluate(
+                config=config, models=models, env=env, step=step, wandb_run=wandb_run
+            )
 
         if step % config.model_save_interval == 0:
             save(
@@ -628,7 +642,13 @@ if __name__ == "__main__":
             log_obj_stats(step=step, models=models, opts=opts, wandb_run=wandb_run)
         step += 1
 
-    evaluate(models=models, env=env, step=config.num_updates, wandb_run=wandb_run)
+    evaluate(
+        config=config,
+        models=models,
+        env=env,
+        step=config.num_updates,
+        wandb_run=wandb_run,
+    )
     save(
         step=config.num_updates,
         save_root_dir=save_root_dir,
@@ -637,3 +657,7 @@ if __name__ == "__main__":
         opts=opts,
         wandb_run=wandb_run,
     )
+
+
+if __name__ == "__main__":
+    main()
