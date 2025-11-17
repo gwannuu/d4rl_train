@@ -526,15 +526,15 @@ def log_obj_stats(
         for name, model in models._asdict().items():
             mean, std = get_all_array_stats(model)
 
-            stats[f"train/model/{name}_mean"], stats[f"train/model/{name}_std"] = (
+            stats[f"params/{name}_mean"], stats[f"params/{name}_std"] = (
                 mean,
                 std,
             )
 
         for name, opt in opts._asdict().items():
             (
-                stats[f"train/optimizer/{name}_mean"],
-                stats[f"train/optimizer/{name}_std"],
+                stats[f"opts/{name}_mean"],
+                stats[f"opts/{name}_std"],
             ) = get_all_array_stats(opt)
         wandb_run.log(stats, step=step)
 
@@ -584,8 +584,6 @@ if __name__ == "__main__":
     rngs, env, dataset = prepare_training(config)
     env.seed(config.seed)
     actor_net, q_net, q_target_net, alpha_net = initialize_network(config, rngs, env)
-
-    num_evals = config.num_updates
 
     actor_opt = nnx.Optimizer(actor_net, optax.adam(learning_rate=config.actor_lr))
     q_opt = nnx.Optimizer(q_net, optax.adam(learning_rate=config.q_lr))
