@@ -26,6 +26,7 @@ import wandb
 from utils.config import generate_experiment_hash, get_git_hash
 from utils.jax import restore_state, save_state
 
+wandb_log: bool = True
 wandb_notes: str = "first running"
 wandb_tags: list[str] = ["cql"]
 wandb_project: str = "d4rl_train"
@@ -56,7 +57,6 @@ class Config:
     eval_interval: int = 50_000
 
     # Logging
-    log: bool = True
     train_log_interval: int = 10_000
 
     # Model Save
@@ -542,10 +542,9 @@ def log_obj_stats(
         wandb_run.log(stats, step=step)
 
 
-def extract_experiment_metadata():
+def extract_experiment_metadata(config):
     global wandb_tags
     global machine_name
-    config = Config()
     git_hash = get_git_hash(length=12)
     wandb_tags.append(git_hash)
     wandb_config = dataclasses.asdict(config)
@@ -559,19 +558,25 @@ def extract_experiment_metadata():
 
     exp_hash = generate_experiment_hash(config_dict=wandb_config, length=12)
 
-    return config, wandb_config, exp_hash
+    return wandb_config, exp_hash
 
 
 def main(sweep=False):
-    config, wandb_config, exp_hash = extract_experiment_metadata()
+    run_params = {}
+    if sweep:
+        wandb_run = wandb.init()
+        valid_keys = {f.name for f in dataclasses.fields(Config)}
+        run_params = {k: v for k, v in wandb_run.config.items() if k in valid_keys}
+    config = Config(**run_params)
+    wandb_config, exp_hash = extract_experiment_metadata(config=config)
 
     wandb_run = None
-    if config.log:
+    if wandb_log:
         wandb.login(key=os.environ["WANDB_API_KEY"])
         wandb_run = wandb.init(
             project=wandb_project,
             config=wandb_config,
-            name=f"cql/{exp_hash}",
+            # name=f"cql/{exp_hash}",
             notes=wandb_notes,
             tags=wandb_tags,
             settings=wandb.Settings(
@@ -582,12 +587,7 @@ def main(sweep=False):
             group=None if sweep else wandb_group_id,
             # id=wandb_run_id,
         )
-
     if wandb_run:
-        if wandb_run.sweep_id:
-            valid_keys = {f.name for f in dataclasses.fields(Config)}
-            run_params = {k: v for k, v in wandb_run.config.items() if k in valid_keys}
-            config = Config(**run_params)
         save_root_dir = Path.cwd() / f"ckpt/cql/{wandb_run.id}"
     else:
         save_root_dir = Path.cwd() / f"ckpt/cql/{exp_hash}"
