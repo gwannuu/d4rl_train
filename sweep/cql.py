@@ -8,7 +8,15 @@ sweep_configuration = {
     "metric": {"goal": "maximize", "name": "valid/avg_return"},
     "parameters": {
         "seed": {"values": [2025, 3025, 4025, 5025]},
-        "batch_size": {"values": [128, 256]},
+        # "batch_size": {"values": [256]},
+        "dataset": {
+            "values": [
+                "antmaze-large-diverse-v0",
+                "antmaze-large-play-v0",
+                "antmaze-medium-play-v0",
+                "antmaze-medium-diverse-v0",
+            ]
+        },
         # "epochs": {"values": [5, 10, 15]},
         # "lr": {"max": 0.1, "min": 0.0001},
     },
