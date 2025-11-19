@@ -318,9 +318,7 @@ def train_batch(
     key = rngs.random()
 
     def batch_sampler(dataset):
-        indices = jax.random.choice(
-            key, len_dataset, (config.batch_size,), replace=False
-        )
+        indices = jax.random.choice(key, len_dataset, (config.batch_size,))
         # jax.debug.print(indices)
         # Use jax.debug.print without f-strings so the tracer isn't stringified during tracing.
         # This will print concrete values at runtime (not during tracing/compilation).
