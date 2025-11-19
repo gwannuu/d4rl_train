@@ -26,9 +26,12 @@ import wandb
 from utils.config import generate_experiment_hash, get_git_hash
 from utils.jax import restore_state, save_state
 
+wandb_log: bool = True
 wandb_notes: str = "first running"
 wandb_tags: list[str] = ["cql"]
 wandb_project: str = "d4rl_train"
+wandb_group_id: str = "cql_0"
+machine_name: str = os.environ["MACHINE_NAME"]
 
 
 @dataclass(frozen=True)
@@ -39,7 +42,7 @@ class Config:
     # Train
     seed: int = 4212
     num_critics: int = 2
-    num_updates: int = 10_000_000
+    num_updates: int = 2_500_000
     polyak_step_size: float = 0.005
     batch_size: int = 256
     gamma: float = 0.99
@@ -51,15 +54,14 @@ class Config:
 
     # Eval
     eval_workers: int = 8
-    eval_interval: int = 10_000
+    eval_interval: int = 50_000
 
     # Logging
-    log: bool = True
-    train_log_interval: int = 2_500
+    train_log_interval: int = 10_000
 
     # Model Save
     save: bool = True
-    model_save_interval: int = 100_000
+    model_save_interval: int = 500_000
 
 
 Models = namedtuple("Models", "actor vec_q vec_q_target alpha")
@@ -213,7 +215,7 @@ class TanhGaussianPolicy(nnx.Module):
         return pi
 
 
-def restore_ckpt(wandb_run_id, models, opts, wandb_run):
+def restore_ckpt(wandb_run_id, models, opts, wandb_run, checkpointer):
     print(f"--- Resuming W&B Run '{wandb_run_id}' ... ---")
     artifact = wandb_run.use_artifact(f"{wandb_run_id}:latest")
     step = artifact.metadata["step"]
@@ -443,7 +445,7 @@ def train_batch(
 
 
 def evaluate_policy(
-    env: vector.VectorEnv, actor: TanhGaussianPolicy, num_episodes: int
+    config: Config, env: vector.VectorEnv, actor: TanhGaussianPolicy, num_episodes: int
 ):
     # Run episodes in the vectorized env using the deterministic policy (tanh(mean))
     obs = env.reset()
@@ -473,12 +475,13 @@ def evaluate_policy(
 
 
 def evaluate(
+    config: Config,
     models: Models,
     env: vector.VectorEnv,
     step: int,
     wandb_run: wandb.Run | None = None,
 ):
-    eval_metrics = evaluate_policy(env, models.actor, num_episodes=env.num_envs)
+    eval_metrics = evaluate_policy(config, env, models.actor, num_episodes=env.num_envs)
 
     log_data = {f"valid/{k}": float(v) for k, v in eval_metrics._asdict().items()}
     if wandb_run is not None:
@@ -526,43 +529,54 @@ def log_obj_stats(
         for name, model in models._asdict().items():
             mean, std = get_all_array_stats(model)
 
-            stats[f"train/model/{name}_mean"], stats[f"train/model/{name}_std"] = (
+            stats[f"params/{name}_mean"], stats[f"params/{name}_std"] = (
                 mean,
                 std,
             )
 
         for name, opt in opts._asdict().items():
             (
-                stats[f"train/optimizer/{name}_mean"],
-                stats[f"train/optimizer/{name}_std"],
+                stats[f"opts/{name}_mean"],
+                stats[f"opts/{name}_std"],
             ) = get_all_array_stats(opt)
         wandb_run.log(stats, step=step)
 
 
-if __name__ == "__main__":
-    config = Config()
-    random.seed(config.seed)
-    np.random.seed(config.seed)
-
+def extract_experiment_metadata(config):
+    global wandb_tags
+    global machine_name
     git_hash = get_git_hash(length=12)
     wandb_tags.append(git_hash)
     wandb_config = dataclasses.asdict(config)
     wandb_config["metadata"] = {
         "git_hash": git_hash,
-        "host": socket.gethostname(),
+        # "host": socket.gethostname(),
+        "machine_name": machine_name,
         "username": getpass.getuser(),
         # "mac_address": uuid.getnode(),
     }
 
     exp_hash = generate_experiment_hash(config_dict=wandb_config, length=12)
 
+    return wandb_config, exp_hash
+
+
+def main(sweep=False):
+    run_params = {}
+    if sweep:
+        wandb_run = wandb.init()
+        valid_keys = {f.name for f in dataclasses.fields(Config)}
+        run_params = {k: v for k, v in wandb_run.config.items() if k in valid_keys}
+    config = Config(**run_params)
+    wandb_config, exp_hash = extract_experiment_metadata(config=config)
+
     wandb_run = None
-    if config.log:
+    if wandb_log:
         wandb.login(key=os.environ["WANDB_API_KEY"])
         wandb_run = wandb.init(
             project=wandb_project,
             config=wandb_config,
-            name=f"cql/{exp_hash}",
+            # name=f"cql/{exp_hash}",
             notes=wandb_notes,
             tags=wandb_tags,
             settings=wandb.Settings(
@@ -570,22 +584,21 @@ if __name__ == "__main__":
                 save_code=True,
                 disable_git=False,
             ),
-            group=config.dataset,
+            group=None if sweep else wandb_group_id,
             # id=wandb_run_id,
         )
-
     if wandb_run:
         save_root_dir = Path.cwd() / f"ckpt/cql/{wandb_run.id}"
     else:
         save_root_dir = Path.cwd() / f"ckpt/cql/{exp_hash}"
+    random.seed(config.seed)
+    np.random.seed(config.seed)
     Path.mkdir(save_root_dir, exist_ok=True, parents=True)
     checkpointer = ocp.StandardCheckpointer()
 
     rngs, env, dataset = prepare_training(config)
     env.seed(config.seed)
     actor_net, q_net, q_target_net, alpha_net = initialize_network(config, rngs, env)
-
-    num_evals = config.num_updates
 
     actor_opt = nnx.Optimizer(actor_net, optax.adam(learning_rate=config.actor_lr))
     q_opt = nnx.Optimizer(q_net, optax.adam(learning_rate=config.q_lr))
@@ -607,7 +620,9 @@ if __name__ == "__main__":
 
     while step < config.num_updates:
         if step % config.eval_interval == 0:
-            evaluate(models=models, env=env, step=step, wandb_run=wandb_run)
+            evaluate(
+                config=config, models=models, env=env, step=step, wandb_run=wandb_run
+            )
 
         if step % config.model_save_interval == 0:
             save(
@@ -630,7 +645,13 @@ if __name__ == "__main__":
             log_obj_stats(step=step, models=models, opts=opts, wandb_run=wandb_run)
         step += 1
 
-    evaluate(models=models, env=env, step=config.num_updates, wandb_run=wandb_run)
+    evaluate(
+        config=config,
+        models=models,
+        env=env,
+        step=config.num_updates,
+        wandb_run=wandb_run,
+    )
     save(
         step=config.num_updates,
         save_root_dir=save_root_dir,
@@ -639,3 +660,7 @@ if __name__ == "__main__":
         opts=opts,
         wandb_run=wandb_run,
     )
+
+
+if __name__ == "__main__":
+    main()
