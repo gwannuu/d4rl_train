@@ -19,10 +19,12 @@ if not sweep_id:
             # "batch_size": {"values": [256]},
             "dataset": {
                 "values": [
-                    "antmaze-large-diverse-v0",
-                    "antmaze-large-play-v0",
-                    "antmaze-medium-play-v0",
-                    "antmaze-medium-diverse-v0",
+                    "antmaze-large-diverse-v2",
+                    "antmaze-large-play-v2",
+                    "antmaze-medium-play-v2",
+                    "antmaze-medium-diverse-v2",
+                    "antmaze-umaze-v2",
+                    "antmaze-umaze-diverse-v2",
                 ]
             },
             # "epochs": {"values": [5, 10, 15]},
