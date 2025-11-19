@@ -4,6 +4,7 @@ import os
 import random
 import socket
 from collections import namedtuple
+import math
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -27,11 +28,12 @@ from utils.config import generate_experiment_hash, get_git_hash
 from utils.jax import restore_state, save_state
 
 wandb_log: bool = True
-wandb_notes: str = "first running"
+wandb_notes: str = "Improve GPU util"
 wandb_tags: list[str] = ["cql"]
 wandb_project: str = "d4rl_train"
-wandb_group_id: str = "cql_0"
+wandb_group_id: str | None = None
 machine_name: str = os.environ["MACHINE_NAME"]
+debug: bool = False
 
 
 @dataclass(frozen=True)
@@ -298,7 +300,6 @@ def get_all_array_stats(
 @nnx.jit(static_argnames=("config", "len_dataset"))
 def train_batch(
     carry: tuple[nnx.Rngs, Models, Opts],
-    _,
     dataset,
     config: Config,
     len_dataset: int,
@@ -440,6 +441,29 @@ def train_batch(
     )
 
     return (rngs, agent_state, opts), metrics
+
+
+@nnx.jit(static_argnames=("config", "len_dataset", "length"))
+def train_multiple_steps(carry, dataset, config, len_dataset, length: int):
+    graphdef, state = nnx.split(carry)
+
+    def scan_fn(state, _):
+        new_carry, metrics = train_batch(
+            nnx.merge(graphdef, state), dataset, config, len_dataset
+        )
+        _, new_state = nnx.split(new_carry)
+        return new_state, metrics
+
+    final_state, stacked_metrics = jax.lax.scan(scan_fn, state, None, length=length)
+
+    # jax.debug.print(
+    #     "length: {} , last_loss: {}",
+    #     len(stacked_metrics.critic_loss),
+    #     stacked_metrics.critic_loss[-1],
+    # )
+    nnx.update(carry, final_state)
+    last_metrics = jax.tree_util.tree_map(lambda x: x[-1], stacked_metrics)
+    return carry, last_metrics
 
 
 def evaluate_policy(
@@ -614,34 +638,43 @@ def main(sweep=False):
         alpha=alpha_opt,
     )
     len_dataset = len(dataset.obs)
-    step = 0
+    cur_step = 0
+    step_length = math.gcd(
+        config.eval_interval, config.model_save_interval, config.train_log_interval
+    )
 
-    while step < config.num_updates:
-        if step % config.eval_interval == 0:
+    while cur_step < config.num_updates:
+        if cur_step % config.eval_interval == 0:
             evaluate(
-                config=config, models=models, env=env, step=step, wandb_run=wandb_run
+                config=config,
+                models=models,
+                env=env,
+                step=cur_step,
+                wandb_run=wandb_run,
             )
 
-        if step % config.model_save_interval == 0:
+        if cur_step % config.model_save_interval == 0 and not debug:
             save(
-                step=step,
+                step=cur_step,
                 save_root_dir=save_root_dir,
                 checkpointer=checkpointer,
                 models=models,
                 opts=opts,
                 wandb_run=wandb_run,
             )
-        (rngs, models, opts), metrics = train_batch(
-            (rngs, models, opts),
-            None,
+
+        (rngs, models, opts), metrics = train_multiple_steps(
+            carry=(rngs, models, opts),
             dataset=dataset,
             config=config,
             len_dataset=len_dataset,
+            length=step_length,
         )
-        if step % config.train_log_interval == 0 and wandb_run is not None:
-            log_train(metrics=metrics, step=step, wandb_run=wandb_run)
-            log_obj_stats(step=step, models=models, opts=opts, wandb_run=wandb_run)
-        step += 1
+
+        if cur_step % config.train_log_interval == 0 and wandb_run is not None:
+            log_train(metrics=metrics, step=cur_step, wandb_run=wandb_run)
+            log_obj_stats(step=cur_step, models=models, opts=opts, wandb_run=wandb_run)
+        cur_step += step_length
 
     evaluate(
         config=config,
@@ -650,14 +683,15 @@ def main(sweep=False):
         step=config.num_updates,
         wandb_run=wandb_run,
     )
-    save(
-        step=config.num_updates,
-        save_root_dir=save_root_dir,
-        checkpointer=checkpointer,
-        models=models,
-        opts=opts,
-        wandb_run=wandb_run,
-    )
+    if not debug:
+        save(
+            step=config.num_updates,
+            save_root_dir=save_root_dir,
+            checkpointer=checkpointer,
+            models=models,
+            opts=opts,
+            wandb_run=wandb_run,
+        )
 
 
 if __name__ == "__main__":
