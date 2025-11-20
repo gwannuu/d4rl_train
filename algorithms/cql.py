@@ -579,10 +579,10 @@ def extract_experiment_metadata(config):
     wandb_tags.append(git_hash)
     wandb_config = dataclasses.asdict(config)
     wandb_config["metadata"] = {
-        "git_hash": git_hash,
+        # "git_hash": git_hash,
         # "host": socket.gethostname(),
         "machine_name": machine_name,
-        "username": getpass.getuser(),
+        # "username": getpass.getuser(),
         # "mac_address": uuid.getnode(),
     }
 
