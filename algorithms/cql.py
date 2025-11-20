@@ -4,6 +4,7 @@ import os
 import random
 import socket
 from collections import namedtuple
+import math
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -27,11 +28,12 @@ from utils.config import generate_experiment_hash, get_git_hash
 from utils.jax import restore_state, save_state
 
 wandb_log: bool = True
-wandb_notes: str = "first running"
+wandb_notes: str = "Improve GPU util"
 wandb_tags: list[str] = ["cql"]
 wandb_project: str = "d4rl_train"
-wandb_group_id: str = "cql_0"
+wandb_group_id: str | None = None
 machine_name: str = os.environ["MACHINE_NAME"]
+debug: bool = False
 
 
 @dataclass(frozen=True)
@@ -298,7 +300,6 @@ def get_all_array_stats(
 @nnx.jit(static_argnames=("config", "len_dataset"))
 def train_batch(
     carry: tuple[nnx.Rngs, Models, Opts],
-    _,
     dataset,
     config: Config,
     len_dataset: int,
@@ -318,9 +319,7 @@ def train_batch(
     key = rngs.random()
 
     def batch_sampler(dataset):
-        indices = jax.random.choice(
-            key, len_dataset, (config.batch_size,), replace=False
-        )
+        indices = jax.random.choice(key, len_dataset, (config.batch_size,))
         # jax.debug.print(indices)
         # Use jax.debug.print without f-strings so the tracer isn't stringified during tracing.
         # This will print concrete values at runtime (not during tracing/compilation).
@@ -444,6 +443,35 @@ def train_batch(
     return (rngs, agent_state, opts), metrics
 
 
+@nnx.jit(static_argnames=("config", "len_dataset", "length"))
+def train_multiple_steps(carry, dataset, config, len_dataset, length: int):
+    graphdef, state = nnx.split(carry)
+
+    def scan_fn(state, _):
+        new_carry, metrics = train_batch(
+            nnx.merge(graphdef, state), dataset, config, len_dataset
+        )
+        _, new_state = nnx.split(new_carry)
+        return new_state, metrics
+
+    final_state, stacked_metrics = jax.lax.scan(scan_fn, state, None, length=length)
+
+    # jax.debug.print(
+    #     "length: {} , last_loss: {}",
+    #     len(stacked_metrics.critic_loss),
+    #     stacked_metrics.critic_loss[-1],
+    # )
+    nnx.update(carry, final_state)
+    last_metrics = jax.tree_util.tree_map(lambda x: x[-1], stacked_metrics)
+    # jax.debug.print(
+    #     "metric shape: {}, carry shape : {}",
+    #     last_metrics.critic_loss.shape,
+    #     len(carry[0]),
+    # )
+
+    return carry, last_metrics
+
+
 def evaluate_policy(
     config: Config, env: vector.VectorEnv, actor: TanhGaussianPolicy, num_episodes: int
 ):
@@ -478,16 +506,10 @@ def evaluate(
     config: Config,
     models: Models,
     env: vector.VectorEnv,
-    step: int,
-    wandb_run: wandb.Run | None = None,
 ):
     eval_metrics = evaluate_policy(config, env, models.actor, num_episodes=env.num_envs)
-
     log_data = {f"valid/{k}": float(v) for k, v in eval_metrics._asdict().items()}
-    if wandb_run is not None:
-        wandb_run.log(log_data, step=step)
-    else:
-        print(f"step={step} avg_return={eval_metrics.avg_return:.3f}")
+    return log_data
 
 
 def save(
@@ -515,31 +537,39 @@ def save(
         wandb_run.log_artifact(artifact, aliases=[f"{step}"])
 
 
-def log_train(metrics: Metrics, step: int, wandb_run: wandb.Run | None = None):
+def log_metrics(wandb_run, step, train_dict=None, eval_dict=None, state_dict=None):
+    statistics: dict = {}
+    if train_dict:
+        statistics.update(train_dict)
+    if eval_dict:
+        statistics.update(eval_dict)
+    if state_dict:
+        statistics.update(state_dict)
+    if statistics:
+        wandb_run.log(statistics, step=step)
+
+
+def log_train(metrics: Metrics):
     log_data = {f"train/{k}": float(v) for k, v in metrics._asdict().items()}
-    if wandb_run is not None:
-        wandb_run.log(log_data, step=step)
+    return log_data
 
 
-def log_obj_stats(
-    step: int, models: Models, opts: Opts, wandb_run: wandb.Run | None = None
-):
-    if wandb_run:
-        stats = {}
-        for name, model in models._asdict().items():
-            mean, std = get_all_array_stats(model)
+def log_obj_stats(models: Models, opts: Opts):
+    stats = {}
+    for name, model in models._asdict().items():
+        mean, std = get_all_array_stats(model)
 
-            stats[f"params/{name}_mean"], stats[f"params/{name}_std"] = (
-                mean,
-                std,
-            )
+        stats[f"params/{name}_mean"], stats[f"params/{name}_std"] = (
+            mean,
+            std,
+        )
 
-        for name, opt in opts._asdict().items():
-            (
-                stats[f"opts/{name}_mean"],
-                stats[f"opts/{name}_std"],
-            ) = get_all_array_stats(opt)
-        wandb_run.log(stats, step=step)
+    for name, opt in opts._asdict().items():
+        (
+            stats[f"opts/{name}_mean"],
+            stats[f"opts/{name}_std"],
+        ) = get_all_array_stats(opt)
+    return stats
 
 
 def extract_experiment_metadata(config):
@@ -616,50 +646,72 @@ def main(sweep=False):
         alpha=alpha_opt,
     )
     len_dataset = len(dataset.obs)
-    step = 0
+    cur_step = 0
+    step_length = math.gcd(
+        config.eval_interval, config.model_save_interval, config.train_log_interval
+    )
 
-    while step < config.num_updates:
-        if step % config.eval_interval == 0:
-            evaluate(
-                config=config, models=models, env=env, step=step, wandb_run=wandb_run
+    while cur_step < config.num_updates:
+        train_statistics, eval_statistics, state_statistics = None, None, None
+        if cur_step % config.eval_interval == 0:
+            eval_statistics = evaluate(
+                config=config,
+                models=models,
+                env=env,
             )
 
-        if step % config.model_save_interval == 0:
+        if cur_step % config.model_save_interval == 0 and config.save:
             save(
-                step=step,
+                step=cur_step,
                 save_root_dir=save_root_dir,
                 checkpointer=checkpointer,
                 models=models,
                 opts=opts,
                 wandb_run=wandb_run,
             )
-        (rngs, models, opts), metrics = train_batch(
-            (rngs, models, opts),
-            None,
+
+        (rngs, models, opts), metrics = train_multiple_steps(
+            carry=(rngs, models, opts),
             dataset=dataset,
             config=config,
             len_dataset=len_dataset,
+            length=step_length,
         )
-        if step % config.train_log_interval == 0 and wandb_run is not None:
-            log_train(metrics=metrics, step=step, wandb_run=wandb_run)
-            log_obj_stats(step=step, models=models, opts=opts, wandb_run=wandb_run)
-        step += 1
 
-    evaluate(
+        if cur_step % config.train_log_interval == 0 and wandb_run is not None:
+            train_statistics = log_train(metrics=metrics)
+            state_statistics = log_obj_stats(models=models, opts=opts)
+
+        if wandb_run is not None:
+            log_metrics(
+                wandb_run=wandb_run,
+                step=cur_step,
+                train_dict=train_statistics,
+                eval_dict=eval_statistics,
+                state_dict=state_statistics,
+            )
+        cur_step += step_length
+
+    eval_statistic = evaluate(
         config=config,
         models=models,
         env=env,
-        step=config.num_updates,
-        wandb_run=wandb_run,
     )
-    save(
-        step=config.num_updates,
-        save_root_dir=save_root_dir,
-        checkpointer=checkpointer,
-        models=models,
-        opts=opts,
-        wandb_run=wandb_run,
-    )
+    if wandb_run is not None:
+        log_metrics(
+            wandb_run=wandb_run,
+            step=config.num_updates,
+            eval_dict=eval_statistic,
+        )
+    if not debug and config.save:
+        save(
+            step=config.num_updates,
+            save_root_dir=save_root_dir,
+            checkpointer=checkpointer,
+            models=models,
+            opts=opts,
+            wandb_run=wandb_run,
+        )
 
 
 if __name__ == "__main__":
