@@ -27,6 +27,7 @@ if not sweep_id:
                     "antmaze-umaze-diverse-v2",
                 ]
             },
+            "cql_importance_sampling": {"values": [True, False]},
             # "epochs": {"values": [5, 10, 15]},
             # "lr": {"max": 0.1, "min": 0.0001},
         },
