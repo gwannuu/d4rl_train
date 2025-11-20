@@ -463,6 +463,12 @@ def train_multiple_steps(carry, dataset, config, len_dataset, length: int):
     # )
     nnx.update(carry, final_state)
     last_metrics = jax.tree_util.tree_map(lambda x: x[-1], stacked_metrics)
+    # jax.debug.print(
+    #     "metric shape: {}, carry shape : {}",
+    #     last_metrics.critic_loss.shape,
+    #     len(carry[0]),
+    # )
+
     return carry, last_metrics
 
 
@@ -500,16 +506,10 @@ def evaluate(
     config: Config,
     models: Models,
     env: vector.VectorEnv,
-    step: int,
-    wandb_run: wandb.Run | None = None,
 ):
     eval_metrics = evaluate_policy(config, env, models.actor, num_episodes=env.num_envs)
-
     log_data = {f"valid/{k}": float(v) for k, v in eval_metrics._asdict().items()}
-    if wandb_run is not None:
-        wandb_run.log(log_data, step=step)
-    else:
-        print(f"step={step} avg_return={eval_metrics.avg_return:.3f}")
+    return log_data
 
 
 def save(
@@ -537,31 +537,39 @@ def save(
         wandb_run.log_artifact(artifact, aliases=[f"{step}"])
 
 
-def log_train(metrics: Metrics, step: int, wandb_run: wandb.Run | None = None):
+def log_metrics(wandb_run, step, train_dict=None, eval_dict=None, state_dict=None):
+    statistics: dict = {}
+    if train_dict:
+        statistics.update(train_dict)
+    if eval_dict:
+        statistics.update(eval_dict)
+    if state_dict:
+        statistics.update(state_dict)
+    if statistics:
+        wandb_run.log(statistics, step=step)
+
+
+def log_train(metrics: Metrics):
     log_data = {f"train/{k}": float(v) for k, v in metrics._asdict().items()}
-    if wandb_run is not None:
-        wandb_run.log(log_data, step=step)
+    return log_data
 
 
-def log_obj_stats(
-    step: int, models: Models, opts: Opts, wandb_run: wandb.Run | None = None
-):
-    if wandb_run:
-        stats = {}
-        for name, model in models._asdict().items():
-            mean, std = get_all_array_stats(model)
+def log_obj_stats(models: Models, opts: Opts):
+    stats = {}
+    for name, model in models._asdict().items():
+        mean, std = get_all_array_stats(model)
 
-            stats[f"params/{name}_mean"], stats[f"params/{name}_std"] = (
-                mean,
-                std,
-            )
+        stats[f"params/{name}_mean"], stats[f"params/{name}_std"] = (
+            mean,
+            std,
+        )
 
-        for name, opt in opts._asdict().items():
-            (
-                stats[f"opts/{name}_mean"],
-                stats[f"opts/{name}_std"],
-            ) = get_all_array_stats(opt)
-        wandb_run.log(stats, step=step)
+    for name, opt in opts._asdict().items():
+        (
+            stats[f"opts/{name}_mean"],
+            stats[f"opts/{name}_std"],
+        ) = get_all_array_stats(opt)
+    return stats
 
 
 def extract_experiment_metadata(config):
@@ -644,16 +652,15 @@ def main(sweep=False):
     )
 
     while cur_step < config.num_updates:
+        train_statistics, eval_statistics, state_statistics = None, None, None
         if cur_step % config.eval_interval == 0:
-            evaluate(
+            eval_statistics = evaluate(
                 config=config,
                 models=models,
                 env=env,
-                step=cur_step,
-                wandb_run=wandb_run,
             )
 
-        if cur_step % config.model_save_interval == 0 and not debug:
+        if cur_step % config.model_save_interval == 0 and config.save:
             save(
                 step=cur_step,
                 save_root_dir=save_root_dir,
@@ -672,18 +679,31 @@ def main(sweep=False):
         )
 
         if cur_step % config.train_log_interval == 0 and wandb_run is not None:
-            log_train(metrics=metrics, step=cur_step, wandb_run=wandb_run)
-            log_obj_stats(step=cur_step, models=models, opts=opts, wandb_run=wandb_run)
+            train_statistics = log_train(metrics=metrics)
+            state_statistics = log_obj_stats(models=models, opts=opts)
+
+        if wandb_run is not None:
+            log_metrics(
+                wandb_run=wandb_run,
+                step=cur_step,
+                train_dict=train_statistics,
+                eval_dict=eval_statistics,
+                state_dict=state_statistics,
+            )
         cur_step += step_length
 
-    evaluate(
+    eval_statistic = evaluate(
         config=config,
         models=models,
         env=env,
-        step=config.num_updates,
-        wandb_run=wandb_run,
     )
-    if not debug:
+    if wandb_run is not None:
+        log_metrics(
+            wandb_run=wandb_run,
+            step=config.num_updates,
+            eval_dict=eval_statistic,
+        )
+    if not debug and config.save:
         save(
             step=config.num_updates,
             save_root_dir=save_root_dir,
