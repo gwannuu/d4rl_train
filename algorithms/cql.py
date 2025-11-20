@@ -530,9 +530,8 @@ def save(
         save_state(checkpointer=checkpointer, obj=opt, path=cur_save_dir)
 
     if wandb_run is not None:
-        artifact = wandb.Artifact(
-            name=wandb_run.id, type="model", metadata={"step": step}
-        )
+        name = wandb_run.name if wandb_run.name else wandb_run.id
+        artifact = wandb.Artifact(name=name, type="model", metadata={"step": step})
         artifact.add_dir(local_path=str(cur_step_dir))
         wandb_run.log_artifact(artifact, aliases=[f"{step}"])
 
@@ -617,13 +616,15 @@ def main(sweep=False):
             group=None if sweep else wandb_group_id,
             # id=wandb_run_id,
         )
-    if wandb_run:
-        save_root_dir = Path.cwd() / f"ckpt/cql/{wandb_run.id}"
-    else:
-        save_root_dir = Path.cwd() / f"ckpt/cql/{exp_hash}"
+
+    save_root_dir: Path | None = None
+    if wandb_run and config.save:
+        name = wandb_run.name if wandb_run.name else wandb_run.id
+        save_root_dir = Path.cwd() / f"ckpt/cql/{name}"
+        Path.mkdir(save_root_dir, exist_ok=True, parents=True)
+
     random.seed(config.seed)
     np.random.seed(config.seed)
-    Path.mkdir(save_root_dir, exist_ok=True, parents=True)
     checkpointer = ocp.StandardCheckpointer()
 
     rngs, env, dataset = prepare_training(config)
@@ -660,7 +661,7 @@ def main(sweep=False):
                 env=env,
             )
 
-        if cur_step % config.model_save_interval == 0 and config.save:
+        if cur_step % config.model_save_interval == 0 and save_root_dir:
             save(
                 step=cur_step,
                 save_root_dir=save_root_dir,
@@ -703,7 +704,7 @@ def main(sweep=False):
             step=config.num_updates,
             eval_dict=eval_statistic,
         )
-    if not debug and config.save:
+    if not debug and save_root_dir:
         save(
             step=config.num_updates,
             save_root_dir=save_root_dir,
