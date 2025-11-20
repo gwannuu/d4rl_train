@@ -38,7 +38,7 @@ train_log_interval: int = 10_000
 eval_interval: int = 50_000
 model_save: bool = True
 model_save_interval: int = 500_000
-debug: bool = True
+debug: bool = False
 
 
 @dataclass(frozen=True)
