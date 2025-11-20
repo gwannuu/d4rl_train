@@ -26,6 +26,7 @@ from flax.nnx.nn.initializers import constant, uniform
 import wandb
 from utils.config import generate_experiment_hash, get_git_hash
 from utils.jax import nnx_conditional_jit, restore_state, save_state
+from dataset.antmaze_v2 import dataset as antmaze_datasets
 
 wandb_log: bool = True
 wandb_notes: str = "Improve GPU util"
@@ -33,17 +34,17 @@ wandb_tags: list[str] = ["cql"]
 wandb_project: str = "d4rl_train"
 wandb_group_id: str | None = None
 machine_name: str = os.environ["MACHINE_NAME"]
-debug: bool = False
+train_log_interval: int = 10_000
+eval_interval: int = 50_000
 model_save: bool = True
 model_save_interval: int = 500_000
-eval_interval: int = 50_000
-train_log_interval: int = 10_000
+debug: bool = True
 
 
 @dataclass(frozen=True)
 class Config:
     # Metadata
-    dataset: str = "maze2d-umaze-v1"
+    dataset: str = antmaze_datasets[0]
     cql_importance_sampling: bool = True
 
     # Train
@@ -265,8 +266,7 @@ def initialize_network(config: Config, rngs: nnx.Rngs, env: vector.VectorEnv):
     )
     q_net = VectorQ(
         num_critics=config.num_critics,
-        input_dim=env.single_observation_space.shape[0]
-        + env.single_action_space.shape[0],
+        input_dim=env.single_observation_space.shape[0] + num_actions,
         hidden_dims=[256, 256],
         output_dim=1,
         rngs=rngs,
@@ -397,8 +397,8 @@ def train_batch(
     )
 
     def q_loss_fn(q_net: VectorQ):
-        q_pred = q_net(batch.obs, batch.action)
-        critic_loss = jnp.square((q_pred - jnp.expand_dims(target, -1)))
+        beta_q = q_net(batch.obs, batch.action)
+        critic_loss = jnp.square((beta_q - jnp.expand_dims(target, -1)))
         critic_loss = critic_loss.sum(-1).mean()
 
         rand_q = q_net(batch.obs, cql_random_actions)
@@ -412,10 +412,10 @@ def train_batch(
             pi_q = pi_q - jnp.expand_dims(log_prob.sum(-1), (1,))
             next_pi_q = next_pi_q - jnp.expand_dims(next_log_prob.sum(-1), (1,))
 
-        all_qs = jnp.concatenate([rand_q, pi_q, next_pi_q, q_pred], axis=1)
+        all_qs = jnp.concatenate([rand_q, pi_q, next_pi_q, beta_q], axis=1)
         q_ood = jax.scipy.special.logsumexp(all_qs / config.cql_temperature, axis=1)
         q_ood = q_ood * config.cql_temperature
-        q_diff = (jnp.expand_dims(q_ood, 1) - q_pred).mean()
+        q_diff = (jnp.expand_dims(q_ood, 1) - beta_q).mean()
         min_q_loss = q_diff * config.cql_min_q_weight
 
         critic_loss += min_q_loss.mean()

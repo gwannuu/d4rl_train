@@ -4,10 +4,10 @@ import wandb
 from algorithms.cql import extract_experiment_metadata, wandb_project, main
 
 sweep_id: str | None = None
-cuda_visible_devices: int | None = None
+cuda_visible_devices: int = -1
 
-if cuda_visible_devices:
-    os.environ["CUDA_VISIBLE_DEVICES"] = f"{cuda_visible_devices}"
+assert cuda_visible_devices != -1
+os.environ["CUDA_VISIBLE_DEVICES"] = f"{cuda_visible_devices}"
 
 if not sweep_id:
     sweep_configuration = {
