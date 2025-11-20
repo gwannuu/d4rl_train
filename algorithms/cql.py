@@ -34,6 +34,10 @@ wandb_project: str = "d4rl_train"
 wandb_group_id: str | None = None
 machine_name: str = os.environ["MACHINE_NAME"]
 debug: bool = False
+model_save: bool = True
+model_save_interval: int = 500_000
+eval_interval: int = 50_000
+train_log_interval: int = 10_000
 
 
 @dataclass(frozen=True)
@@ -56,14 +60,6 @@ class Config:
 
     # Eval
     eval_workers: int = 8
-    eval_interval: int = 50_000
-
-    # Logging
-    train_log_interval: int = 10_000
-
-    # Model Save
-    save: bool = True
-    model_save_interval: int = 500_000
 
 
 Models = namedtuple("Models", "actor vec_q vec_q_target alpha")
@@ -618,7 +614,7 @@ def main(sweep=False):
         )
 
     save_root_dir: Path | None = None
-    if wandb_run and config.save:
+    if wandb_run and save:
         name = wandb_run.name if wandb_run.name else wandb_run.id
         save_root_dir = Path.cwd() / f"ckpt/cql/{name}"
         Path.mkdir(save_root_dir, exist_ok=True, parents=True)
@@ -648,20 +644,18 @@ def main(sweep=False):
     )
     len_dataset = len(dataset.obs)
     cur_step = 0
-    step_length = math.gcd(
-        config.eval_interval, config.model_save_interval, config.train_log_interval
-    )
+    step_length = math.gcd(eval_interval, model_save_interval, train_log_interval)
 
     while cur_step < config.num_updates:
         train_statistics, eval_statistics, state_statistics = None, None, None
-        if cur_step % config.eval_interval == 0:
+        if cur_step % eval_interval == 0:
             eval_statistics = evaluate(
                 config=config,
                 models=models,
                 env=env,
             )
 
-        if cur_step % config.model_save_interval == 0 and save_root_dir:
+        if cur_step % model_save_interval == 0 and save_root_dir:
             save(
                 step=cur_step,
                 save_root_dir=save_root_dir,
@@ -679,7 +673,7 @@ def main(sweep=False):
             length=step_length,
         )
 
-        if cur_step % config.train_log_interval == 0 and wandb_run is not None:
+        if cur_step % train_log_interval == 0 and wandb_run is not None:
             train_statistics = log_train(metrics=metrics)
             state_statistics = log_obj_stats(models=models, opts=opts)
 
