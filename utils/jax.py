@@ -1,7 +1,9 @@
 import hashlib
 from pathlib import Path
 from typing import Any
+
 import flax.nnx as nnx
+import jax.numpy as jnp
 import orbax.checkpoint as ocp
 
 # https://github.com/google/flax/issues/4423

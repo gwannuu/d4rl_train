@@ -59,6 +59,7 @@ class Config:
     actor_lr: float = 3e-5
     q_lr: float = 1e-4
     alpha_lr: float = 3e-4
+    num_action_sample: int = 10
 
     # Eval
     eval_workers: int = 8
@@ -392,34 +393,45 @@ def train_batch(
     pi_next_actions, next_log_prob = jax.vmap(lambda k, o: _sample_actions(k, o))(
         jax.random.split(key_next_pi, bs), batch.next_obs
     )
+
     cql_random_actions = jax.random.uniform(
-        key_cql, shape=batch.action.shape, minval=-1.0, maxval=1.0
+        key_cql,
+        shape=(batch.action.shape[0], config.num_action_sample, batch.action.shape[1]),
+        minval=-1.0,
+        maxval=1.0,
     )
 
     def q_loss_fn(q_net: VectorQ):
-        beta_q = q_net(batch.obs, batch.action)
-        critic_loss = jnp.square((beta_q - jnp.expand_dims(target, -1)))
-        critic_loss = critic_loss.sum(-1).mean()
-
-        rand_q = q_net(batch.obs, cql_random_actions)
-        pi_q = q_net(batch.obs, pi_actions)
-        next_pi_q = q_net(batch.next_obs, pi_next_actions)
-
+        # https://github.com/aviralkumar2907/CQL/blob/d67dbe9cf5d2b96e3b462b6146f249b3d6569796/d4rl/rlkit/torch/sac/cql.py#L254
         if config.cql_importance_sampling:
+            beta_q = q_net(batch.obs, batch.action)
+            critic_loss = jnp.square((beta_q - jnp.expand_dims(target, -1)))
+            critic_loss = critic_loss.sum(-1).mean()
+
+            rand_q = jax.vmap(q_net, in_axes=(None, 1))(batch.obs, cql_random_actions)
+            pi_q = jnp.expand_dims(q_net(batch.obs, pi_actions), 0).repeat(
+                config.num_action_sample, axis=0
+            )
+            next_pi_q = jnp.expand_dims(
+                q_net(batch.next_obs, pi_next_actions), 0
+            ).repeat(config.num_action_sample, axis=0)
+
             rand_q = rand_q - jnp.expand_dims(
                 jnp.log(0.5 ** batch.action.shape[-1]), (0, 1)
             )
             pi_q = pi_q - jnp.expand_dims(log_prob.sum(-1), (1,))
             next_pi_q = next_pi_q - jnp.expand_dims(next_log_prob.sum(-1), (1,))
 
-        all_qs = jnp.concatenate([rand_q, pi_q, next_pi_q, beta_q], axis=1)
-        q_ood = jax.scipy.special.logsumexp(all_qs / config.cql_temperature, axis=1)
-        q_ood = q_ood * config.cql_temperature
-        q_diff = (jnp.expand_dims(q_ood, 1) - beta_q).mean()
-        min_q_loss = q_diff * config.cql_min_q_weight
+            all_qs = jnp.concatenate([rand_q, pi_q, next_pi_q], axis=0)
+            q_ood = jax.scipy.special.logsumexp(all_qs / config.cql_temperature, axis=0)
+            q_ood = q_ood * config.cql_temperature
+            q_diff = (q_ood - beta_q) * config.cql_min_q_weight
+            min_q_loss = q_diff.sum(-1).mean()
 
-        critic_loss += min_q_loss.mean()
-        return critic_loss
+            critic_loss += min_q_loss
+            return critic_loss
+        else:
+            raise NotImplementedError
 
     q_loss_grad = nnx.value_and_grad(q_loss_fn)
     critic_loss, critic_grad = q_loss_grad(q_net)
