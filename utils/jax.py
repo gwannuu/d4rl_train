@@ -30,6 +30,9 @@ def save_state(
     Returns True if saved, False if skipped (already exists with same content).
     Raises ValueError if destination exists with different content.
     """
+
+    if obj is None:
+        return
     path = Path(path)
     state = nnx.split(obj)[1]
     new_hash = _compute_state_hash(state)
