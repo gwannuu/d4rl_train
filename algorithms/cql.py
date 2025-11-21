@@ -26,7 +26,7 @@ import orbax.checkpoint as ocp
 from flax.nnx.nn.initializers import constant
 
 import wandb
-from utils.config import generate_experiment_hash, get_git_hash
+from utils.config import generate_experiment_hash
 from utils.jax import nnx_conditional_jit, restore_state, save_state
 from dataset.antmaze_v2 import dataset as antmaze_datasets
 
@@ -47,6 +47,9 @@ debug: bool = False
 class Config:
     # Metadata
     dataset: str = antmaze_datasets[0]
+    hidden_layers: tuple[int, ...] = dataclasses.field(
+        default_factory=lambda: (256, 256, 256)
+    )
 
     # Train
     cql_lagrange: bool = False
@@ -97,7 +100,7 @@ class SoftQNetwork(nnx.Module):
         /,
         *,
         input_dim: int,
-        hidden_dims: list[int],
+        hidden_dims: tuple[int, ...],
         output_dim: int,
         rngs: nnx.Rngs,
     ):
@@ -139,7 +142,7 @@ class VectorQ(nnx.Module):
         /,
         *,
         input_dim: int,
-        hidden_dims: list[int],
+        hidden_dims: tuple[int, ...],
         output_dim: int,
         num_critics: int,
         rngs: nnx.Rngs,
@@ -167,7 +170,7 @@ class TanhGaussianPolicy(nnx.Module):
         /,
         *,
         input_dim: int,
-        hidden_dims: list[int],
+        hidden_dims: tuple[int, ...],
         num_actions: int,
         log_std_max: float = 2.0,
         log_std_min: float = -5.0,
@@ -262,7 +265,7 @@ def initialize_network(config: Config, rngs: nnx.Rngs, env: vector.VectorEnv):
     actor_net = TanhGaussianPolicy(
         num_actions=num_actions,
         input_dim=env.single_observation_space.shape[0],
-        hidden_dims=[256, 256],
+        hidden_dims=config.hidden_layers,
         rngs=rngs,
     )
 
@@ -271,7 +274,7 @@ def initialize_network(config: Config, rngs: nnx.Rngs, env: vector.VectorEnv):
     q_net = VectorQ(
         num_critics=config.num_critics,
         input_dim=env.single_observation_space.shape[0] + num_actions,
-        hidden_dims=[256, 256],
+        hidden_dims=config.hidden_layers,
         output_dim=1,
         rngs=rngs,
     )
@@ -666,8 +669,8 @@ def log_obj_stats(models: Models, opts: Opts):
 def extract_experiment_metadata(config):
     global wandb_tags
     global machine_name
-    git_hash = get_git_hash(length=12)
-    wandb_tags.append(git_hash)
+    # git_hash = get_git_hash(length=12)
+    # wandb_tags.append(git_hash)
     wandb_config = dataclasses.asdict(config)
     wandb_config["metadata"] = {
         # "git_hash": git_hash,
@@ -689,7 +692,7 @@ def main(sweep=False):
         valid_keys = {f.name for f in dataclasses.fields(Config)}
         run_params = {k: v for k, v in wandb_run.config.items() if k in valid_keys}
     config = Config(**run_params)
-    wandb_config, exp_hash = extract_experiment_metadata(config=config)
+    wandb_config, _ = extract_experiment_metadata(config=config)
 
     wandb_run = None
     if wandb_log:
