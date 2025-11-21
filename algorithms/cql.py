@@ -8,6 +8,8 @@ import math
 from dataclasses import dataclass
 from pathlib import Path
 
+from utils.jax import sym
+
 os.environ["XLA_FLAGS"] = "--xla_gpu_deterministic_ops=true --xla_gpu_autotune_level=0"
 os.environ["TF_DETERMINISTIC_OPS"] = "1"
 
@@ -21,7 +23,7 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 import orbax.checkpoint as ocp
-from flax.nnx.nn.initializers import constant, uniform
+from flax.nnx.nn.initializers import constant
 
 import wandb
 from utils.config import generate_experiment_hash, get_git_hash
@@ -59,6 +61,7 @@ class Config:
     actor_lr: float = 3e-5
     q_lr: float = 1e-4
     alpha_lr: float = 3e-4
+    num_action_sample: int = 10
 
     # Eval
     eval_workers: int = 8
@@ -72,13 +75,6 @@ Metrics = namedtuple(
     "Metrics", "critic_loss actor_loss alpha_loss entropy alpha q_min q_std"
 )
 EvalMetrics = namedtuple("EvalMetrics", "avg_return score score_std")
-
-
-def sym(scale):
-    def _init(*args, **kwargs):
-        return uniform(2 * scale)(*args, **kwargs) - scale
-
-    return _init
 
 
 class EntropyCoef(nnx.Module):
@@ -120,6 +116,8 @@ class SoftQNetwork(nnx.Module):
         self.q_layer = nnx.Linear(
             in_features=in_dim,
             out_features=output_dim,
+            # https://github.com/haarnoja/sac/blob/8258e33633c7e37833cc39315891e77adfbe14b2/sac/misc/mlp.py#L25
+            # https://github.com/aviralkumar2907/CQL/blob/d67dbe9cf5d2b96e3b462b6146f249b3d6569796/d4rl/rlkit/torch/sac/policies.py#L62
             kernel_init=sym(3e-3),
             bias_init=sym(3e-3),
             rngs=rngs,
@@ -264,6 +262,9 @@ def initialize_network(config: Config, rngs: nnx.Rngs, env: vector.VectorEnv):
         hidden_dims=[256, 256],
         rngs=rngs,
     )
+
+    # https://github.com/young-geng/JaxCQL/blob/bac4299194bd6ae2bc7db9034fd1a31ac43a30d7/JaxCQL/model.py#L82
+    # https://github.com/hyeon1996/EPQ/blob/c56847215d748b937d9c6952cfe7a481363163a0/epq_main.py#L113
     q_net = VectorQ(
         num_critics=config.num_critics,
         input_dim=env.single_observation_space.shape[0] + num_actions,
@@ -392,34 +393,49 @@ def train_batch(
     pi_next_actions, next_log_prob = jax.vmap(lambda k, o: _sample_actions(k, o))(
         jax.random.split(key_next_pi, bs), batch.next_obs
     )
+
+    # https://github.com/aviralkumar2907/CQL/blob/d67dbe9cf5d2b96e3b462b6146f249b3d6569796/d4rl/rlkit/torch/sac/cql.py#L139
+    # https://github.com/young-geng/JaxCQL/blob/bac4299194bd6ae2bc7db9034fd1a31ac43a30d7/JaxCQL/conservative_sac.py#L214
+    # https://github.com/EmptyJackson/unifloral/blob/0ac6fb73590436efc29214601bef12c8ab23fae3/algorithms/cql.py#L286
     cql_random_actions = jax.random.uniform(
-        key_cql, shape=batch.action.shape, minval=-1.0, maxval=1.0
+        key_cql,
+        shape=(batch.action.shape[0], config.num_action_sample, batch.action.shape[1]),
+        minval=-1.0,
+        maxval=1.0,
     )
 
     def q_loss_fn(q_net: VectorQ):
-        beta_q = q_net(batch.obs, batch.action)
-        critic_loss = jnp.square((beta_q - jnp.expand_dims(target, -1)))
-        critic_loss = critic_loss.sum(-1).mean()
-
-        rand_q = q_net(batch.obs, cql_random_actions)
-        pi_q = q_net(batch.obs, pi_actions)
-        next_pi_q = q_net(batch.next_obs, pi_next_actions)
-
+        # https://github.com/aviralkumar2907/CQL/blob/d67dbe9cf5d2b96e3b462b6146f249b3d6569796/d4rl/rlkit/torch/sac/cql.py#L254
+        # https://github.com/EmptyJackson/unifloral/blob/0ac6fb73590436efc29214601bef12c8ab23fae3/algorithms/cql.py#L297
         if config.cql_importance_sampling:
+            beta_q = q_net(batch.obs, batch.action)
+            critic_loss = jnp.square((beta_q - jnp.expand_dims(target, -1)))
+            critic_loss = critic_loss.sum(-1).mean()
+
+            rand_q = jax.vmap(q_net, in_axes=(None, 1))(batch.obs, cql_random_actions)
+            pi_q = jnp.expand_dims(q_net(batch.obs, pi_actions), 0).repeat(
+                config.num_action_sample, axis=0
+            )
+            next_pi_q = jnp.expand_dims(
+                q_net(batch.next_obs, pi_next_actions), 0
+            ).repeat(config.num_action_sample, axis=0)
+
             rand_q = rand_q - jnp.expand_dims(
                 jnp.log(0.5 ** batch.action.shape[-1]), (0, 1)
             )
             pi_q = pi_q - jnp.expand_dims(log_prob.sum(-1), (1,))
             next_pi_q = next_pi_q - jnp.expand_dims(next_log_prob.sum(-1), (1,))
 
-        all_qs = jnp.concatenate([rand_q, pi_q, next_pi_q, beta_q], axis=1)
-        q_ood = jax.scipy.special.logsumexp(all_qs / config.cql_temperature, axis=1)
-        q_ood = q_ood * config.cql_temperature
-        q_diff = (jnp.expand_dims(q_ood, 1) - beta_q).mean()
-        min_q_loss = q_diff * config.cql_min_q_weight
+            all_qs = jnp.concatenate([rand_q, pi_q, next_pi_q], axis=0)
+            q_ood = jax.scipy.special.logsumexp(all_qs / config.cql_temperature, axis=0)
+            q_ood = q_ood * config.cql_temperature
+            q_diff = (q_ood - beta_q) * config.cql_min_q_weight
+            min_q_loss = q_diff.sum(-1).mean()
 
-        critic_loss += min_q_loss.mean()
-        return critic_loss
+            critic_loss += min_q_loss
+            return critic_loss
+        else:
+            raise NotImplementedError
 
     q_loss_grad = nnx.value_and_grad(q_loss_fn)
     critic_loss, critic_grad = q_loss_grad(q_net)
