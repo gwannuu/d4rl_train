@@ -8,6 +8,8 @@ import math
 from dataclasses import dataclass
 from pathlib import Path
 
+from utils.jax import sym
+
 os.environ["XLA_FLAGS"] = "--xla_gpu_deterministic_ops=true --xla_gpu_autotune_level=0"
 os.environ["TF_DETERMINISTIC_OPS"] = "1"
 
@@ -21,7 +23,7 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 import orbax.checkpoint as ocp
-from flax.nnx.nn.initializers import constant, uniform
+from flax.nnx.nn.initializers import constant
 
 import wandb
 from utils.config import generate_experiment_hash, get_git_hash
@@ -73,13 +75,6 @@ Metrics = namedtuple(
     "Metrics", "critic_loss actor_loss alpha_loss entropy alpha q_min q_std"
 )
 EvalMetrics = namedtuple("EvalMetrics", "avg_return score score_std")
-
-
-def sym(scale):
-    def _init(*args, **kwargs):
-        return uniform(2 * scale)(*args, **kwargs) - scale
-
-    return _init
 
 
 class EntropyCoef(nnx.Module):

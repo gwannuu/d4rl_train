@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import Any
 
 import flax.nnx as nnx
+from flax.nnx.nn.initializers import uniform
 import jax.numpy as jnp
 import orbax.checkpoint as ocp
 
@@ -86,3 +87,12 @@ def nnx_conditional_jit(cond, *args, **kwargs):
         return identity_decorator
     else:
         return nnx.jit(*args, **kwargs)
+
+
+# https://github.com/EmptyJackson/unifloral/blob/0ac6fb73590436efc29214601bef12c8ab23fae3/algorithms/cql.py#L66
+# https://github.com/aviralkumar2907/CQL/blob/d67dbe9cf5d2b96e3b462b6146f249b3d6569796/d4rl/rlkit/torch/networks.py#L63
+def sym(scale):
+    def _init(*args, **kwargs):
+        return uniform(2 * scale)(*args, **kwargs) - scale
+
+    return _init
