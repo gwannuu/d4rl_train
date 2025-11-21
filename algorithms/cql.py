@@ -24,9 +24,10 @@ import numpy as np
 import optax
 import orbax.checkpoint as ocp
 from flax.nnx.nn.initializers import constant
+from tqdm.auto import tqdm
 
 import wandb
-from utils.config import generate_experiment_hash, get_git_hash
+from utils.config import generate_experiment_hash
 from utils.jax import nnx_conditional_jit, restore_state, save_state
 from dataset.antmaze_v2 import dataset as antmaze_datasets
 
@@ -47,10 +48,14 @@ debug: bool = False
 class Config:
     # Metadata
     dataset: str = antmaze_datasets[0]
+    hidden_layers: tuple[int, ...] = dataclasses.field(
+        default_factory=lambda: (256, 256, 256)
+    )
 
     # Train
     cql_lagrange: bool = False
     cql_importance_sampling: bool = True
+    q_learning_backup_entropy: bool = False
     seed: int = 4212
     num_critics: int = 2
     num_updates: int = 1_000_000
@@ -97,7 +102,7 @@ class SoftQNetwork(nnx.Module):
         /,
         *,
         input_dim: int,
-        hidden_dims: list[int],
+        hidden_dims: tuple[int, ...],
         output_dim: int,
         rngs: nnx.Rngs,
     ):
@@ -139,7 +144,7 @@ class VectorQ(nnx.Module):
         /,
         *,
         input_dim: int,
-        hidden_dims: list[int],
+        hidden_dims: tuple[int, ...],
         output_dim: int,
         num_critics: int,
         rngs: nnx.Rngs,
@@ -167,7 +172,7 @@ class TanhGaussianPolicy(nnx.Module):
         /,
         *,
         input_dim: int,
-        hidden_dims: list[int],
+        hidden_dims: tuple[int, ...],
         num_actions: int,
         log_std_max: float = 2.0,
         log_std_min: float = -5.0,
@@ -262,7 +267,7 @@ def initialize_network(config: Config, rngs: nnx.Rngs, env: vector.VectorEnv):
     actor_net = TanhGaussianPolicy(
         num_actions=num_actions,
         input_dim=env.single_observation_space.shape[0],
-        hidden_dims=[256, 256],
+        hidden_dims=config.hidden_layers,
         rngs=rngs,
     )
 
@@ -271,7 +276,7 @@ def initialize_network(config: Config, rngs: nnx.Rngs, env: vector.VectorEnv):
     q_net = VectorQ(
         num_critics=config.num_critics,
         input_dim=env.single_observation_space.shape[0] + num_actions,
-        hidden_dims=[256, 256],
+        hidden_dims=config.hidden_layers,
         output_dim=1,
         rngs=rngs,
     )
@@ -380,15 +385,18 @@ def train_batch(
 
     bs = batch.next_obs.shape[0]
 
-    def _sample_next_v(rng_key, next_obs):
+    def _sample_next_q(rng_key, next_obs):
         next_pi = new_actor_net(next_obs)
         next_action, log_next_pi = next_pi.sample_and_log_prob(seed=rng_key)
         next_q = q_target_net(next_obs, next_action)
-        return next_q.min(-1) - alpha * log_next_pi.sum(-1)
+        next_q = next_q.min(-1)
+        if config.q_learning_backup_entropy:
+            next_q = next_q - alpha * log_next_pi.sum(-1)
+        return next_q
 
-    next_v_target = _sample_next_v(key, batch.next_obs)
-    next_v_target = jax.lax.stop_gradient(next_v_target)
-    target = batch.reward + config.gamma * (1 - batch.done) * next_v_target
+    next_q = _sample_next_q(key, batch.next_obs)
+    next_q = jax.lax.stop_gradient(next_q)
+    target = batch.reward + config.gamma * (1 - batch.done) * next_q
 
     key_pi, key_next_pi, key_cql = jax.random.split(key, 3)
 
@@ -424,19 +432,37 @@ def train_batch(
         critic_loss = jnp.square((beta_q - jnp.expand_dims(target, -1)))
         critic_loss = critic_loss.sum(-1).mean()
 
-        rand_q = jax.vmap(q_net, in_axes=(None, 1))(batch.obs, cql_random_actions)
-        pi_q = jnp.expand_dims(q_net(batch.obs, pi_actions), 0).repeat(
-            config.num_action_sample, axis=0
-        )
-        next_pi_q = jnp.expand_dims(q_net(batch.next_obs, pi_next_actions), 0).repeat(
+        # Loop to avoid nested vmaps that fragment the matmul contracting dimension.
+        log_uniform = jnp.log(0.5 ** batch.action.shape[-1])
+        rand_q_list = []
+        for i in range(config.num_action_sample):
+            rand_q_i = q_net(batch.obs, cql_random_actions[:, i, :]) - log_uniform
+            rand_q_list.append(rand_q_i)
+        rand_q = jnp.stack(rand_q_list, axis=0)
+        # Flatten (batch, samples) axes to avoid nested vmaps that fragment matmuls
+        # b, n, a_dim = cql_random_actions.shape
+        # actions_flat = cql_random_actions.reshape(n * b, a_dim)
+        # obs_repeat = jnp.repeat(batch.obs, n, axis=0)
+        # rand_q_flat = q_net(obs_repeat, actions_flat)
+        # rand_q = rand_q_flat.reshape(b, n, -1).transpose(1, 0, 2)
+        # pi_q = jnp.expand_dims(q_net(batch.obs, pi_actions), 0).repeat(
+        #     config.num_action_sample, axis=0
+        # )
+        # next_pi_q = jnp.expand_dims(q_net(batch.next_obs, pi_next_actions), 0).repeat(
+        #     config.num_action_sample, axis=0
+        # )
+
+        log_pi = log_prob.sum(-1, keepdims=True)
+        pi_q_base = q_net(batch.obs, pi_actions) - log_pi
+        pi_q = jnp.expand_dims(pi_q_base, axis=0).repeat(
             config.num_action_sample, axis=0
         )
 
-        rand_q = rand_q - jnp.expand_dims(
-            jnp.log(0.5 ** batch.action.shape[-1]), (0, 1)
+        log_next_pi = next_log_prob.sum(-1, keepdims=True)
+        next_pi_q_base = q_net(batch.next_obs, pi_next_actions) - log_next_pi
+        next_pi_q = jnp.expand_dims(next_pi_q_base, axis=0).repeat(
+            config.num_action_sample, axis=0
         )
-        pi_q = pi_q - jnp.expand_dims(log_prob.sum(-1), (1,))
-        next_pi_q = next_pi_q - jnp.expand_dims(next_log_prob.sum(-1), (1,))
 
         all_qs = jnp.concatenate([rand_q, pi_q, next_pi_q], axis=0)
         q_ood = (
@@ -666,8 +692,8 @@ def log_obj_stats(models: Models, opts: Opts):
 def extract_experiment_metadata(config):
     global wandb_tags
     global machine_name
-    git_hash = get_git_hash(length=12)
-    wandb_tags.append(git_hash)
+    # git_hash = get_git_hash(length=12)
+    # wandb_tags.append(git_hash)
     wandb_config = dataclasses.asdict(config)
     wandb_config["metadata"] = {
         # "git_hash": git_hash,
@@ -689,7 +715,7 @@ def main(sweep=False):
         valid_keys = {f.name for f in dataclasses.fields(Config)}
         run_params = {k: v for k, v in wandb_run.config.items() if k in valid_keys}
     config = Config(**run_params)
-    wandb_config, exp_hash = extract_experiment_metadata(config=config)
+    wandb_config, _ = extract_experiment_metadata(config=config)
 
     wandb_run = None
     if wandb_log:
@@ -748,10 +774,15 @@ def main(sweep=False):
         alpha_prime=alpha_prime_opt,
     )
     len_dataset = len(dataset.obs)
-    cur_step = 0
     step_length = math.gcd(eval_interval, model_save_interval, train_log_interval)
 
-    while cur_step < config.num_updates:
+    step_iterator = tqdm(
+        range(0, config.num_updates, step_length),
+        desc="Training",
+        dynamic_ncols=True,
+    )
+
+    for cur_step in step_iterator:
         train_statistics, eval_statistics, state_statistics = None, None, None
         if cur_step % eval_interval == 0:
             eval_statistics = evaluate(
@@ -790,7 +821,6 @@ def main(sweep=False):
                 eval_dict=eval_statistics,
                 state_dict=state_statistics,
             )
-        cur_step += step_length
 
     eval_statistic = evaluate(
         config=config,
