@@ -13,9 +13,11 @@ if not sweep_id:
     sweep_configuration = {
         "method": "grid",
         "name": "sweep",
-        "metric": {"goal": "maximize", "name": "valid/avg_return"},
+        "metric": {"goal": "maximize", "name": "valid/score"},
         "parameters": {
-            "seed": {"values": [2025, 3025, 4025, 5025]},
+            "seed": {
+                "values": [20251, 30251, 40251, 50251, 60251, 70251, 80251, 90251]
+            },
             # "batch_size": {"values": [256]},
             "dataset": {
                 "values": [
@@ -28,6 +30,8 @@ if not sweep_id:
                 ]
             },
             "cql_importance_sampling": {"values": [True, False]},
+            "cql_lagrange": {"values": [True, False]},
+            "cql_target_gap_expansion": {"values": [5.0, 10.0]},
             # "epochs": {"values": [5, 10, 15]},
             # "lr": {"max": 0.1, "min": 0.0001},
         },
