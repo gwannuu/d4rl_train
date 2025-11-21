@@ -2,9 +2,14 @@ from functools import partial
 import os
 import wandb
 from algorithms.cql import extract_experiment_metadata, wandb_project, main
+from dataset.antmaze_v2 import check_and_download_dataset, dataset as antmaze_v2_datasets
+
 
 sweep_id: str | None = None
 cuda_visible_devices: int = -1
+
+if cuda_visible_devices == -1 and sweep_id is None:
+    check_and_download_dataset(antmaze_v2_datasets)
 
 assert cuda_visible_devices != -1
 os.environ["CUDA_VISIBLE_DEVICES"] = f"{cuda_visible_devices}"
