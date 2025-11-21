@@ -53,7 +53,7 @@ class Config:
     cql_importance_sampling: bool = True
     seed: int = 4212
     num_critics: int = 2
-    num_updates: int = 2_500_000
+    num_updates: int = 1_000_000
     polyak_step_size: float = 0.005
     batch_size: int = 256
     gamma: float = 0.99
