@@ -31,7 +31,7 @@ from utils.jax import nnx_conditional_jit, restore_state, save_state
 from dataset.antmaze_v2 import dataset as antmaze_datasets
 
 wandb_log: bool = True
-wandb_notes: str = "Improve GPU util"
+wandb_notes: str = "Add lagrangian dual & importance sampling"
 wandb_tags: list[str] = ["cql"]
 wandb_project: str = "d4rl_train"
 wandb_group_id: str | None = None
@@ -47,12 +47,13 @@ debug: bool = False
 class Config:
     # Metadata
     dataset: str = antmaze_datasets[0]
-    cql_importance_sampling: bool = True
 
     # Train
+    cql_lagrange: bool = False
+    cql_importance_sampling: bool = True
     seed: int = 4212
     num_critics: int = 2
-    num_updates: int = 2_500_000
+    num_updates: int = 1_000_000
     polyak_step_size: float = 0.005
     batch_size: int = 256
     gamma: float = 0.99
@@ -62,22 +63,24 @@ class Config:
     q_lr: float = 1e-4
     alpha_lr: float = 3e-4
     num_action_sample: int = 10
+    cql_target_gap_expansion: float = 5.0
 
     # Eval
     eval_workers: int = 8
 
 
-Models = namedtuple("Models", "actor vec_q vec_q_target alpha")
-Opts = namedtuple("Opts", "actor q alpha")
+Models = namedtuple("Models", "actor vec_q vec_q_target alpha alpha_prime")
+Opts = namedtuple("Opts", "actor q alpha alpha_prime")
 Transition = namedtuple("Transition", "obs action reward next_obs done")
 
 Metrics = namedtuple(
-    "Metrics", "critic_loss actor_loss alpha_loss entropy alpha q_min q_std"
+    "Metrics",
+    "critic_loss gap_mean gap_residual actor_loss alpha_loss alpha_prime_loss entropy alpha alpha_prime q_min q_std",
 )
 EvalMetrics = namedtuple("EvalMetrics", "avg_return score score_std")
 
 
-class EntropyCoef(nnx.Module):
+class LogScalar(nnx.Module):
     def __init__(self, /, *, ent_coef_init: float = 1.0):
         self.log_ent_coef = nnx.Param(jnp.log(ent_coef_init))
 
@@ -273,8 +276,9 @@ def initialize_network(config: Config, rngs: nnx.Rngs, env: vector.VectorEnv):
         rngs=rngs,
     )
     q_target_net = nnx.clone(q_net)
-    alpha_net = EntropyCoef()
-    return actor_net, q_net, q_target_net, alpha_net
+    alpha = LogScalar()
+    alpha_prime = LogScalar() if config.cql_lagrange else None
+    return actor_net, q_net, q_target_net, alpha, alpha_prime
 
 
 def get_all_array_stats(
@@ -308,10 +312,16 @@ def train_batch(
     q_net = agent_state.vec_q
     q_target_net = agent_state.vec_q_target
     alpha_net = agent_state.alpha
+    alpha_prime_net = agent_state.alpha_prime
 
     actor_opt = opts.actor
     q_opt = opts.q
     alpha_opt = opts.alpha
+    alpha_prime_opt = opts.alpha_prime
+
+    assert config.cql_lagrange == (
+        alpha_prime_net is not None and alpha_prime_opt is not None
+    )
 
     # draw one key for this call and split into many subkeys used below
     key = rngs.random()
@@ -333,7 +343,7 @@ def train_batch(
     batch, _ = batch_sampler(dataset)
 
     def alpha_loss_fn(
-        alpha_net: EntropyCoef, actor_net: TanhGaussianPolicy, batch: Transition
+        alpha_net: LogScalar, actor_net: TanhGaussianPolicy, batch: Transition
     ):
         pi = actor_net(batch.obs)
         _, log_pi = pi.sample_and_log_prob(seed=key)
@@ -405,42 +415,67 @@ def train_batch(
     )
 
     def q_loss_fn(q_net: VectorQ):
-        # https://github.com/aviralkumar2907/CQL/blob/d67dbe9cf5d2b96e3b462b6146f249b3d6569796/d4rl/rlkit/torch/sac/cql.py#L254
-        # https://github.com/EmptyJackson/unifloral/blob/0ac6fb73590436efc29214601bef12c8ab23fae3/algorithms/cql.py#L297
-        if config.cql_importance_sampling:
-            beta_q = q_net(batch.obs, batch.action)
-            critic_loss = jnp.square((beta_q - jnp.expand_dims(target, -1)))
-            critic_loss = critic_loss.sum(-1).mean()
-
-            rand_q = jax.vmap(q_net, in_axes=(None, 1))(batch.obs, cql_random_actions)
-            pi_q = jnp.expand_dims(q_net(batch.obs, pi_actions), 0).repeat(
-                config.num_action_sample, axis=0
-            )
-            next_pi_q = jnp.expand_dims(
-                q_net(batch.next_obs, pi_next_actions), 0
-            ).repeat(config.num_action_sample, axis=0)
-
-            rand_q = rand_q - jnp.expand_dims(
-                jnp.log(0.5 ** batch.action.shape[-1]), (0, 1)
-            )
-            pi_q = pi_q - jnp.expand_dims(log_prob.sum(-1), (1,))
-            next_pi_q = next_pi_q - jnp.expand_dims(next_log_prob.sum(-1), (1,))
-
-            all_qs = jnp.concatenate([rand_q, pi_q, next_pi_q], axis=0)
-            q_ood = jax.scipy.special.logsumexp(all_qs / config.cql_temperature, axis=0)
-            q_ood = q_ood * config.cql_temperature
-            q_diff = (q_ood - beta_q) * config.cql_min_q_weight
-            min_q_loss = q_diff.sum(-1).mean()
-
-            critic_loss += min_q_loss
-            return critic_loss
-        else:
+        if not config.cql_importance_sampling:
             raise NotImplementedError
 
-    q_loss_grad = nnx.value_and_grad(q_loss_fn)
-    critic_loss, critic_grad = q_loss_grad(q_net)
+        # https://github.com/aviralkumar2907/CQL/blob/d67dbe9cf5d2b96e3b462b6146f249b3d6569796/d4rl/rlkit/torch/sac/cql.py#L254
+        # https://github.com/EmptyJackson/unifloral/blob/0ac6fb73590436efc29214601bef12c8ab23fae3/algorithms/cql.py#L297
+        beta_q = q_net(batch.obs, batch.action)
+        critic_loss = jnp.square((beta_q - jnp.expand_dims(target, -1)))
+        critic_loss = critic_loss.sum(-1).mean()
+
+        rand_q = jax.vmap(q_net, in_axes=(None, 1))(batch.obs, cql_random_actions)
+        pi_q = jnp.expand_dims(q_net(batch.obs, pi_actions), 0).repeat(
+            config.num_action_sample, axis=0
+        )
+        next_pi_q = jnp.expand_dims(q_net(batch.next_obs, pi_next_actions), 0).repeat(
+            config.num_action_sample, axis=0
+        )
+
+        rand_q = rand_q - jnp.expand_dims(
+            jnp.log(0.5 ** batch.action.shape[-1]), (0, 1)
+        )
+        pi_q = pi_q - jnp.expand_dims(log_prob.sum(-1), (1,))
+        next_pi_q = next_pi_q - jnp.expand_dims(next_log_prob.sum(-1), (1,))
+
+        all_qs = jnp.concatenate([rand_q, pi_q, next_pi_q], axis=0)
+        q_ood = (
+            jax.scipy.special.logsumexp(all_qs / config.cql_temperature, axis=0)
+            * config.cql_temperature
+        )
+        q_gap = q_ood - beta_q
+        gap_mean = q_gap.sum(-1).mean()
+
+        if config.cql_lagrange:
+            lagrange_multiplier = jnp.exp(alpha_prime_net())
+            gap_residual = gap_mean - config.cql_target_gap_expansion
+            min_q_loss = lagrange_multiplier * gap_residual
+        else:
+            gap_residual = gap_mean
+            min_q_loss = config.cql_min_q_weight * gap_mean
+
+        critic_loss += min_q_loss
+        return critic_loss, (gap_mean, gap_residual)
+
+    q_loss_grad = nnx.value_and_grad(q_loss_fn, has_aux=True)
+    (critic_loss, (gap_mean, gap_residual)), critic_grad = q_loss_grad(q_net)
     q_opt.update(grads=critic_grad)
     new_q = q_opt.model
+
+    alpha_prime_loss = None
+    alpha_prime_value = jnp.array(config.cql_min_q_weight, dtype=jnp.float32)
+    new_alpha_prime_net = None
+
+    if config.cql_lagrange:
+
+        def alpha_prime_loss_fn(alpha_prime_param: LogScalar):
+            return -alpha_prime_param() * jax.lax.stop_gradient(gap_residual)
+
+        alpha_prime_grad_fn = nnx.value_and_grad(alpha_prime_loss_fn)
+        alpha_prime_loss, alpha_prime_grad = alpha_prime_grad_fn(alpha_prime_net)
+        alpha_prime_opt.update(grads=alpha_prime_grad)
+        new_alpha_prime_net = alpha_prime_opt.model
+        alpha_prime_value = new_alpha_prime_net.exp()
 
     # Polyak (soft) update target params toward updated online Q params
     q_target_net_param = optax.incremental_update(
@@ -450,12 +485,30 @@ def train_batch(
     )
     nnx.update(q_target_net, q_target_net_param)
 
+    agent_state = Models(
+        actor=new_actor_net,
+        vec_q=new_q,
+        vec_q_target=q_target_net,
+        alpha=new_alpha_net,
+        alpha_prime=new_alpha_prime_net,
+    )
+    opts = Opts(
+        actor=actor_opt,
+        q=q_opt,
+        alpha=alpha_opt,
+        alpha_prime=alpha_prime_opt,
+    )
+
     metrics = Metrics(
         critic_loss=critic_loss,
+        gap_mean=gap_mean,
+        gap_residual=gap_residual,
         actor_loss=actor_loss,
         alpha_loss=alpha_loss,
+        alpha_prime_loss=alpha_prime_loss,
         entropy=entropy.mean(),
         alpha=alpha,
+        alpha_prime=alpha_prime_value,
         q_min=q_min.mean(),
         q_std=q_std.mean(),
     )
@@ -537,7 +590,11 @@ def evaluate(
     env: vector.VectorEnv,
 ):
     eval_metrics = evaluate_policy(config, env, models.actor, num_episodes=env.num_envs)
-    log_data = {f"valid/{k}": float(v) for k, v in eval_metrics._asdict().items()}
+    log_data = {
+        f"valid/{k}": float(v)
+        for k, v in eval_metrics._asdict().items()
+        if v is not None
+    }
     return log_data
 
 
@@ -565,20 +622,26 @@ def save(
         wandb_run.log_artifact(artifact, aliases=[f"{step}"])
 
 
+def _clean_dict(d):
+    return {k: v for k, v in d.items() if v is not None}
+
+
 def log_metrics(wandb_run, step, train_dict=None, eval_dict=None, state_dict=None):
     statistics: dict = {}
     if train_dict:
-        statistics.update(train_dict)
+        statistics.update(_clean_dict(train_dict))
     if eval_dict:
-        statistics.update(eval_dict)
+        statistics.update(_clean_dict(eval_dict))
     if state_dict:
-        statistics.update(state_dict)
+        statistics.update(_clean_dict(state_dict))
     if statistics:
         wandb_run.log(statistics, step=step)
 
 
 def log_train(metrics: Metrics):
-    log_data = {f"train/{k}": float(v) for k, v in metrics._asdict().items()}
+    log_data = {
+        f"train/{k}": float(v) for k, v in metrics._asdict().items() if v is not None
+    }
     return log_data
 
 
@@ -658,22 +721,31 @@ def main(sweep=False):
 
     rngs, env, dataset = prepare_training(config)
     env.seed(config.seed)
-    actor_net, q_net, q_target_net, alpha_net = initialize_network(config, rngs, env)
+    actor_net, q_net, q_target_net, alpha, alpha_prime = initialize_network(
+        config, rngs, env
+    )
 
     actor_opt = nnx.Optimizer(actor_net, optax.adam(learning_rate=config.actor_lr))
     q_opt = nnx.Optimizer(q_net, optax.adam(learning_rate=config.q_lr))
-    alpha_opt = nnx.Optimizer(alpha_net, optax.adam(learning_rate=config.alpha_lr))
+    alpha_opt = nnx.Optimizer(alpha, optax.adam(learning_rate=config.alpha_lr))
+    alpha_prime_opt = (
+        nnx.Optimizer(alpha_prime, optax.adam(learning_rate=config.alpha_lr))
+        if alpha_prime is not None
+        else None
+    )
 
     models = Models(
         actor=actor_net,
         vec_q=q_net,
         vec_q_target=q_target_net,
-        alpha=alpha_net,
+        alpha=alpha,
+        alpha_prime=alpha_prime,
     )
     opts = Opts(
         actor=actor_opt,
         q=q_opt,
         alpha=alpha_opt,
+        alpha_prime=alpha_prime_opt,
     )
     len_dataset = len(dataset.obs)
     cur_step = 0
