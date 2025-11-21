@@ -2404,6 +2404,7 @@ dependencies = [
     { name = "numpy", version = "2.3.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "orbax-checkpoint" },
     { name = "orbax-export" },
+    { name = "tqdm" },
     { name = "wandb" },
 ]
 
@@ -2420,6 +2421,7 @@ requires-dist = [
     { name = "numpy", specifier = ">=2" },
     { name = "orbax-checkpoint", specifier = ">=0.11.25" },
     { name = "orbax-export", specifier = ">=0.0.8" },
+    { name = "tqdm", specifier = ">=4.66.0" },
     { name = "wandb", specifier = ">=0.23.0" },
 ]
 

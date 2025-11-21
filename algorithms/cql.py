@@ -24,6 +24,7 @@ import numpy as np
 import optax
 import orbax.checkpoint as ocp
 from flax.nnx.nn.initializers import constant
+from tqdm.auto import tqdm
 
 import wandb
 from utils.config import generate_experiment_hash
@@ -773,10 +774,15 @@ def main(sweep=False):
         alpha_prime=alpha_prime_opt,
     )
     len_dataset = len(dataset.obs)
-    cur_step = 0
     step_length = math.gcd(eval_interval, model_save_interval, train_log_interval)
 
-    while cur_step < config.num_updates:
+    step_iterator = tqdm(
+        range(0, config.num_updates, step_length),
+        desc="Training",
+        dynamic_ncols=True,
+    )
+
+    for cur_step in step_iterator:
         train_statistics, eval_statistics, state_statistics = None, None, None
         if cur_step % eval_interval == 0:
             eval_statistics = evaluate(
@@ -815,7 +821,6 @@ def main(sweep=False):
                 eval_dict=eval_statistics,
                 state_dict=state_statistics,
             )
-        cur_step += step_length
 
     eval_statistic = evaluate(
         config=config,
