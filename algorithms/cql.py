@@ -54,6 +54,7 @@ class Config:
     # Train
     cql_lagrange: bool = False
     cql_importance_sampling: bool = True
+    q_learning_backup_entropy: bool = False
     seed: int = 4212
     num_critics: int = 2
     num_updates: int = 1_000_000
@@ -383,15 +384,18 @@ def train_batch(
 
     bs = batch.next_obs.shape[0]
 
-    def _sample_next_v(rng_key, next_obs):
+    def _sample_next_q(rng_key, next_obs):
         next_pi = new_actor_net(next_obs)
         next_action, log_next_pi = next_pi.sample_and_log_prob(seed=rng_key)
         next_q = q_target_net(next_obs, next_action)
-        return next_q.min(-1) - alpha * log_next_pi.sum(-1)
+        next_q = next_q.min(-1)
+        if config.q_learning_backup_entropy:
+            next_q = next_q - alpha * log_next_pi.sum(-1)
+        return next_q
 
-    next_v_target = _sample_next_v(key, batch.next_obs)
-    next_v_target = jax.lax.stop_gradient(next_v_target)
-    target = batch.reward + config.gamma * (1 - batch.done) * next_v_target
+    next_q = _sample_next_q(key, batch.next_obs)
+    next_q = jax.lax.stop_gradient(next_q)
+    target = batch.reward + config.gamma * (1 - batch.done) * next_q
 
     key_pi, key_next_pi, key_cql = jax.random.split(key, 3)
 
