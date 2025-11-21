@@ -431,19 +431,37 @@ def train_batch(
         critic_loss = jnp.square((beta_q - jnp.expand_dims(target, -1)))
         critic_loss = critic_loss.sum(-1).mean()
 
-        rand_q = jax.vmap(q_net, in_axes=(None, 1))(batch.obs, cql_random_actions)
-        pi_q = jnp.expand_dims(q_net(batch.obs, pi_actions), 0).repeat(
-            config.num_action_sample, axis=0
-        )
-        next_pi_q = jnp.expand_dims(q_net(batch.next_obs, pi_next_actions), 0).repeat(
+        # Loop to avoid nested vmaps that fragment the matmul contracting dimension.
+        log_uniform = jnp.log(0.5 ** batch.action.shape[-1])
+        rand_q_list = []
+        for i in range(config.num_action_sample):
+            rand_q_i = q_net(batch.obs, cql_random_actions[:, i, :]) - log_uniform
+            rand_q_list.append(rand_q_i)
+        rand_q = jnp.stack(rand_q_list, axis=0)
+        # Flatten (batch, samples) axes to avoid nested vmaps that fragment matmuls
+        # b, n, a_dim = cql_random_actions.shape
+        # actions_flat = cql_random_actions.reshape(n * b, a_dim)
+        # obs_repeat = jnp.repeat(batch.obs, n, axis=0)
+        # rand_q_flat = q_net(obs_repeat, actions_flat)
+        # rand_q = rand_q_flat.reshape(b, n, -1).transpose(1, 0, 2)
+        # pi_q = jnp.expand_dims(q_net(batch.obs, pi_actions), 0).repeat(
+        #     config.num_action_sample, axis=0
+        # )
+        # next_pi_q = jnp.expand_dims(q_net(batch.next_obs, pi_next_actions), 0).repeat(
+        #     config.num_action_sample, axis=0
+        # )
+
+        log_pi = log_prob.sum(-1, keepdims=True)
+        pi_q_base = q_net(batch.obs, pi_actions) - log_pi
+        pi_q = jnp.expand_dims(pi_q_base, axis=0).repeat(
             config.num_action_sample, axis=0
         )
 
-        rand_q = rand_q - jnp.expand_dims(
-            jnp.log(0.5 ** batch.action.shape[-1]), (0, 1)
+        log_next_pi = next_log_prob.sum(-1, keepdims=True)
+        next_pi_q_base = q_net(batch.next_obs, pi_next_actions) - log_next_pi
+        next_pi_q = jnp.expand_dims(next_pi_q_base, axis=0).repeat(
+            config.num_action_sample, axis=0
         )
-        pi_q = pi_q - jnp.expand_dims(log_prob.sum(-1), (1,))
-        next_pi_q = next_pi_q - jnp.expand_dims(next_log_prob.sum(-1), (1,))
 
         all_qs = jnp.concatenate([rand_q, pi_q, next_pi_q], axis=0)
         q_ood = (
