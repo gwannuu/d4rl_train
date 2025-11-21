@@ -72,3 +72,15 @@ def restore_state(
     state = checkpointer.restore(dir, abs_state)
     restored = nnx.merge(graphdef, state)
     return restored
+
+
+def nnx_conditional_jit(cond, *args, **kwargs):
+    """JIT decorator that can be disabled for debugging."""
+    if cond:
+
+        def identity_decorator(f):
+            return f
+
+        return identity_decorator
+    else:
+        return nnx.jit(*args, **kwargs)

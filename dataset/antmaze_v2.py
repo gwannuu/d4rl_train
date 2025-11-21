@@ -1,6 +1,15 @@
 import d4rl
 import gym
 
+dataset = [
+    "antmaze-large-diverse-v2",
+    "antmaze-large-play-v2",
+    "antmaze-medium-play-v2",
+    "antmaze-medium-diverse-v2",
+    "antmaze-umaze-v2",
+    "antmaze-umaze-diverse-v2",
+]
+
 
 def check_and_download_dataset(dataset: list[str]):
     for d in dataset:
@@ -10,12 +19,4 @@ def check_and_download_dataset(dataset: list[str]):
 
 
 if __name__ == "__main__":
-    dataset = [
-        "antmaze-large-diverse-v2",
-        "antmaze-large-play-v2",
-        "antmaze-medium-play-v2",
-        "antmaze-medium-diverse-v2",
-        "antmaze-umaze-v2",
-        "antmaze-umaze-diverse-v2",
-    ]
     check_and_download_dataset(dataset)

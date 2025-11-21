@@ -25,7 +25,8 @@ from flax.nnx.nn.initializers import constant, uniform
 
 import wandb
 from utils.config import generate_experiment_hash, get_git_hash
-from utils.jax import restore_state, save_state
+from utils.jax import nnx_conditional_jit, restore_state, save_state
+from dataset.antmaze_v2 import dataset as antmaze_datasets
 
 wandb_log: bool = True
 wandb_notes: str = "Improve GPU util"
@@ -33,17 +34,18 @@ wandb_tags: list[str] = ["cql"]
 wandb_project: str = "d4rl_train"
 wandb_group_id: str | None = None
 machine_name: str = os.environ["MACHINE_NAME"]
-debug: bool = False
+train_log_interval: int = 10_000
+eval_interval: int = 50_000
 model_save: bool = True
 model_save_interval: int = 500_000
-eval_interval: int = 50_000
-train_log_interval: int = 10_000
+debug: bool = False
 
 
 @dataclass(frozen=True)
 class Config:
     # Metadata
-    dataset: str = "maze2d-umaze-v1"
+    dataset: str = antmaze_datasets[0]
+    cql_importance_sampling: bool = True
 
     # Train
     seed: int = 4212
@@ -264,8 +266,7 @@ def initialize_network(config: Config, rngs: nnx.Rngs, env: vector.VectorEnv):
     )
     q_net = VectorQ(
         num_critics=config.num_critics,
-        input_dim=env.single_observation_space.shape[0]
-        + env.single_action_space.shape[0],
+        input_dim=env.single_observation_space.shape[0] + num_actions,
         hidden_dims=[256, 256],
         output_dim=1,
         rngs=rngs,
@@ -293,7 +294,7 @@ def get_all_array_stats(
     return jnp.mean(all_params_flat), jnp.std(all_params_flat)
 
 
-@nnx.jit(static_argnames=("config", "len_dataset"))
+@nnx_conditional_jit(cond=debug, static_argnames=("config", "len_dataset"))
 def train_batch(
     carry: tuple[nnx.Rngs, Models, Opts],
     dataset,
@@ -382,13 +383,13 @@ def train_batch(
 
     def _sample_actions(rng_key, obs):
         pi = new_actor_net(obs)
-        return pi.sample(seed=rng_key)
+        return pi.sample_and_log_prob(seed=rng_key)
 
     # sample actions per-batch (vectorized)
-    pi_actions = jax.vmap(lambda k, o: _sample_actions(k, o))(
+    pi_actions, log_prob = jax.vmap(lambda k, o: _sample_actions(k, o))(
         jax.random.split(key_pi, bs), batch.obs
     )
-    pi_next_actions = jax.vmap(lambda k, o: _sample_actions(k, o))(
+    pi_next_actions, next_log_prob = jax.vmap(lambda k, o: _sample_actions(k, o))(
         jax.random.split(key_next_pi, bs), batch.next_obs
     )
     cql_random_actions = jax.random.uniform(
@@ -396,18 +397,25 @@ def train_batch(
     )
 
     def q_loss_fn(q_net: VectorQ):
-        q_pred = q_net(batch.obs, batch.action)
-        critic_loss = jnp.square((q_pred - jnp.expand_dims(target, -1)))
+        beta_q = q_net(batch.obs, batch.action)
+        critic_loss = jnp.square((beta_q - jnp.expand_dims(target, -1)))
         critic_loss = critic_loss.sum(-1).mean()
 
         rand_q = q_net(batch.obs, cql_random_actions)
         pi_q = q_net(batch.obs, pi_actions)
         next_pi_q = q_net(batch.next_obs, pi_next_actions)
 
-        all_qs = jnp.concatenate([rand_q, pi_q, next_pi_q, q_pred], axis=1)
+        if config.cql_importance_sampling:
+            rand_q = rand_q - jnp.expand_dims(
+                jnp.log(0.5 ** batch.action.shape[-1]), (0, 1)
+            )
+            pi_q = pi_q - jnp.expand_dims(log_prob.sum(-1), (1,))
+            next_pi_q = next_pi_q - jnp.expand_dims(next_log_prob.sum(-1), (1,))
+
+        all_qs = jnp.concatenate([rand_q, pi_q, next_pi_q, beta_q], axis=1)
         q_ood = jax.scipy.special.logsumexp(all_qs / config.cql_temperature, axis=1)
         q_ood = q_ood * config.cql_temperature
-        q_diff = (jnp.expand_dims(q_ood, 1) - q_pred).mean()
+        q_diff = (jnp.expand_dims(q_ood, 1) - beta_q).mean()
         min_q_loss = q_diff * config.cql_min_q_weight
 
         critic_loss += min_q_loss.mean()
@@ -439,33 +447,42 @@ def train_batch(
     return (rngs, agent_state, opts), metrics
 
 
-@nnx.jit(static_argnames=("config", "len_dataset", "length"))
-def train_multiple_steps(carry, dataset, config, len_dataset, length: int):
-    graphdef, state = nnx.split(carry)
+@nnx_conditional_jit(cond=debug, static_argnames=("config", "len_dataset", "length"))
+def train_multiple_steps(
+    carry: tuple[nnx.Rngs, Models, Opts], dataset, config, len_dataset, length: int
+):
+    metrics = None
+    if debug:
+        for _ in range(length):
+            carry, metrics = train_batch(carry, dataset, config, len_dataset)
 
-    def scan_fn(state, _):
-        new_carry, metrics = train_batch(
-            nnx.merge(graphdef, state), dataset, config, len_dataset
-        )
-        _, new_state = nnx.split(new_carry)
-        return new_state, metrics
+    else:
+        graphdef, state = nnx.split(carry)
 
-    final_state, stacked_metrics = jax.lax.scan(scan_fn, state, None, length=length)
+        def scan_fn(state, _):
+            new_carry, metrics = train_batch(
+                nnx.merge(graphdef, state), dataset, config, len_dataset
+            )
+            _, new_state = nnx.split(new_carry)
+            return new_state, metrics
 
-    # jax.debug.print(
-    #     "length: {} , last_loss: {}",
-    #     len(stacked_metrics.critic_loss),
-    #     stacked_metrics.critic_loss[-1],
-    # )
-    nnx.update(carry, final_state)
-    last_metrics = jax.tree_util.tree_map(lambda x: x[-1], stacked_metrics)
-    # jax.debug.print(
-    #     "metric shape: {}, carry shape : {}",
-    #     last_metrics.critic_loss.shape,
-    #     len(carry[0]),
-    # )
+        final_state, stacked_metrics = jax.lax.scan(scan_fn, state, None, length=length)
 
-    return carry, last_metrics
+        # jax.debug.print(
+        #     "length: {} , last_loss: {}",
+        #     len(stacked_metrics.critic_loss),
+        #     stacked_metrics.critic_loss[-1],
+        # )
+        nnx.update(carry, final_state)
+        metrics = jax.tree_util.tree_map(lambda x: x[-1], stacked_metrics)
+        # jax.debug.print(
+        #     "metric shape: {}, carry shape : {}",
+        #     last_metrics.critic_loss.shape,
+        #     len(carry[0]),
+        # )
+
+    assert metrics is not None
+    return carry, metrics
 
 
 def evaluate_policy(

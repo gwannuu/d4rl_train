@@ -4,10 +4,10 @@ import wandb
 from algorithms.cql import extract_experiment_metadata, wandb_project, main
 
 sweep_id: str | None = None
-cuda_visible_devices: int | None = None
+cuda_visible_devices: int = -1
 
-if cuda_visible_devices:
-    os.environ["CUDA_VISIBLE_DEVICES"] = f"{cuda_visible_devices}"
+assert cuda_visible_devices != -1
+os.environ["CUDA_VISIBLE_DEVICES"] = f"{cuda_visible_devices}"
 
 if not sweep_id:
     sweep_configuration = {
@@ -27,6 +27,7 @@ if not sweep_id:
                     "antmaze-umaze-diverse-v2",
                 ]
             },
+            "cql_importance_sampling": {"values": [True, False]},
             # "epochs": {"values": [5, 10, 15]},
             # "lr": {"max": 0.1, "min": 0.0001},
         },
