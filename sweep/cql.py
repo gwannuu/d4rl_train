@@ -1,15 +1,29 @@
 from functools import partial
 import os
 import wandb
-from algorithms.cql import extract_experiment_metadata, wandb_project, main
-from dataset.antmaze_v2 import check_and_download_dataset, dataset as antmaze_v2_datasets
+
+from algorithms import cql as cql_module
+from dataset.antmaze_v2 import (
+    ANTMAZE_DATASETS,
+    check_and_load_datasets,
+    get_dataset_file_path,
+)
+
 
 
 sweep_id: str | None = None
 cuda_visible_devices: int = -1
+dataset_dir: str | None = cql_module.dataset_dir
 
 if cuda_visible_devices == -1 and sweep_id is None:
-    check_and_download_dataset(antmaze_v2_datasets)
+    raise RuntimeError(
+        "Set 'dataset_dir' in algorithms/cql.py before launching sweeps."
+    )
+
+if dataset_dir is None:
+    raise RuntimeError(
+        "Set 'dataset_dir' in algorithms/cql.py before launching sweeps."
+    )
 
 assert cuda_visible_devices != -1
 os.environ["CUDA_VISIBLE_DEVICES"] = f"{cuda_visible_devices}"
@@ -41,8 +55,10 @@ if not sweep_id:
             # "lr": {"max": 0.1, "min": 0.0001},
         },
     }
-    sweep_id = wandb.sweep(sweep=sweep_configuration, project=wandb_project)
+    sweep_id = wandb.sweep(sweep=sweep_configuration, project=cql_module.wandb_project)
 
 wandb.agent(
-    sweep_id=sweep_id, function=partial(main, sweep=True), project=wandb_project
+    sweep_id=sweep_id,
+    function=partial(cql_module.main, sweep=True),
+    project=cql_module.wandb_project,
 )
