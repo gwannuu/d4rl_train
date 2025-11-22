@@ -34,7 +34,7 @@ from dataset.antmaze_v2 import (
 )
 from utils.config import generate_experiment_hash
 
-wandb_log: bool = False
+wandb_log: bool = True
 wandb_notes: str | None = None
 wandb_tags: list[str] = ["cql_w", "First training"]
 wandb_project: str = "d4rl_train"
@@ -88,7 +88,7 @@ Transition = namedtuple("Transition", "obs action reward next_obs done")
 
 Metrics = namedtuple(
     "Metrics",
-    "critic_loss gap_distance actor_loss alpha_prime_loss entropy alpha_prime q_min q_std q_max",
+    "critic_loss gap_distance gap_distance_std actor_loss alpha_prime_loss entropy alpha_prime q_min q_std q_max",
 )
 EvalMetrics = namedtuple("EvalMetrics", "avg_return score score_std")
 
@@ -463,7 +463,8 @@ def train_batch(
 
     metrics = Metrics(
         critic_loss=critic_loss,
-        gap_distance=distance_gap,
+        gap_distance=distance_gap.mean(),
+        gap_distance_std=distance_gap.std(),
         actor_loss=actor_loss,
         alpha_prime_loss=alpha_prime_loss,
         entropy=entropy.mean(),
