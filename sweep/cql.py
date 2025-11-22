@@ -47,8 +47,9 @@ if not sweep_id:
                     "antmaze-umaze-diverse-v2",
                 ]
             },
-            "cql_lagrange": {"values": [True]},
-            "cql_target_gap_expansion": {"values": [5.0, 10.0]},
+            "cql_lagrange": {"values": [False]},
+            # "cql_target_gap_expansion": {"values": [5.0, 10.0]},
+            "cql_min_q_weight": {"values": [5.0, 1.0]},
             "actor_lr": {"values": [3e-5, 1e-4, 3e-4]},
             "q_lr": {"values": [1e-4, 3e-4]},
             # "epochs": {"values": [5, 10, 15]},
