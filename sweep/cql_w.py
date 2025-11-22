@@ -10,7 +10,6 @@ from dataset.antmaze_v2 import (
 )
 
 
-
 sweep_id: str | None = None
 cuda_visible_devices: int = -1
 dataset_dir: str | None = cql_w_module.dataset_dir
@@ -48,8 +47,10 @@ if not sweep_id:
                     "antmaze-umaze-diverse-v2",
                 ]
             },
-            "alpha_prime_lr": {"values": [1e-4, 3e-4, 1e-3]},
-            "num_action_sample": {"values": [2, 5, 10, 25]},
+            "q_lr": {"values": [1e-4, 3e-4]},
+            "actor_lr": {"values": [3e-5, 1e-4, 3e-4]},
+            "alpha_prime_lr": {"values": [3e-5, 1e-4, 3e-4]},
+            "num_action_sample": {"values": [25, 10, 5, 2]},
             # "cql_importance_sampling": {"values": [True, False]},
             # "cql_lagrange": {"values": [True, False]},
             # "cql_target_gap_expansion": {"values": [5.0, 10.0]},
@@ -57,7 +58,9 @@ if not sweep_id:
             # "lr": {"max": 0.1, "min": 0.0001},
         },
     }
-    sweep_id = wandb.sweep(sweep=sweep_configuration, project=cql_w_module.wandb_project)
+    sweep_id = wandb.sweep(
+        sweep=sweep_configuration, project=cql_w_module.wandb_project
+    )
 
 wandb.agent(
     sweep_id=sweep_id,
