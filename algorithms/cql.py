@@ -29,7 +29,11 @@ from tqdm.auto import tqdm
 import wandb
 from utils.config import generate_experiment_hash
 from utils.jax import nnx_conditional_jit, restore_state, save_state
-from dataset.antmaze_v2 import ANTMAZE_DATASETS
+from dataset.antmaze_v2 import (
+    ANTMAZE_DATASETS,
+    get_dataset_file_path,
+    load_dataset_from_file,
+)
 
 wandb_log: bool = True
 wandb_notes: str = "Add lagrangian dual & importance sampling"
@@ -42,12 +46,14 @@ eval_interval: int = 50_000
 model_save: bool = True
 model_save_interval: int = 500_000
 debug: bool = False
+dataset_dir: str = os.environ["DATASET_DIR"]  # Set this to your local AntMaze dataset directory.
+DEFAULT_DATASET: str = "antmaze-large-diverse-v2"
 
 
 @dataclass(frozen=True)
 class Config:
     # Metadata
-    dataset: str = ANTMAZE_DATASETS["antmaze-large-diverse-v2"]
+    dataset: str = DEFAULT_DATASET
     hidden_layers: tuple[int, ...] = dataclasses.field(
         default_factory=lambda: (256, 256, 256)
     )
@@ -248,16 +254,29 @@ def restore_ckpt(wandb_run_id, models, opts, wandb_run, checkpointer):
     return (step, Models(**restored_models), Opts(**restored_opts))
 
 
+def _load_local_dataset(env_id: str) -> dict[str, np.ndarray]:
+    """Load an offline dataset strictly from the local filesystem."""
+
+    if dataset_dir is None:
+        raise RuntimeError(
+            "Set 'dataset_dir' in algorithms/cql.py to your local dataset directory before running experiments."
+        )
+    file_path = get_dataset_file_path(env_id=env_id, dataset_dir=dataset_dir)
+    return load_dataset_from_file(file_path=file_path, env_id=env_id)
+
+
 def prepare_training(config: Config):
     rngs = nnx.Rngs(params=config.seed, random=config.seed + 1)
     env = vector.make(config.dataset, num_envs=config.eval_workers, asynchronous=False)
-    dataset = d4rl.qlearning_dataset(gym.make(config.dataset))
+
+
+    dataset_dict = _load_local_dataset(config.dataset)
     dataset = Transition(
-        obs=jnp.array(dataset["observations"]),
-        action=jnp.array(dataset["actions"]),
-        reward=jnp.array(dataset["rewards"]),
-        next_obs=jnp.array(dataset["next_observations"]),
-        done=jnp.array(dataset["terminals"]),
+        obs=jnp.array(dataset_dict["observations"]),
+        action=jnp.array(dataset_dict["actions"]),
+        reward=jnp.array(dataset_dict["rewards"]),
+        next_obs=jnp.array(dataset_dict["next_observations"]),
+        done=jnp.array(dataset_dict["terminals"]),
     )
     return rngs, env, dataset
 
