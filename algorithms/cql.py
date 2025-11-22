@@ -80,7 +80,7 @@ Transition = namedtuple("Transition", "obs action reward next_obs done")
 
 Metrics = namedtuple(
     "Metrics",
-    "critic_loss gap_mean gap_residual actor_loss alpha_loss alpha_prime_loss entropy alpha alpha_prime q_min q_std",
+    "critic_loss gap_mean gap_residual actor_loss alpha_loss alpha_prime_loss entropy alpha alpha_prime q_min q_std q_max",
 )
 EvalMetrics = namedtuple("EvalMetrics", "avg_return score score_std")
 
@@ -370,11 +370,12 @@ def train_batch(
         q_values = q_net(batch.obs, sampled_action)
         q_min = jnp.min(q_values, axis=-1)
         q_std = jnp.std(q_values, axis=-1)
+        q_max = jnp.max(q_values, axis=-1)
         loss = (-q_min + alpha * log_pi).mean()
-        return loss, (-log_pi, q_min, q_std)
+        return loss, (-log_pi, q_min, q_std, q_max)
 
     actor_grad_fn = nnx.value_and_grad(actor_loss_fn, has_aux=True)
-    (actor_loss, (entropy, q_min, q_std)), actor_grad = actor_grad_fn(actor_net)
+    (actor_loss, (entropy, q_min, q_std, q_max)), actor_grad = actor_grad_fn(actor_net)
     actor_opt.update(grads=actor_grad)
     new_actor_net = actor_opt.model
 
@@ -537,6 +538,7 @@ def train_batch(
         alpha_prime=alpha_prime_value,
         q_min=q_min.mean(),
         q_std=q_std.mean(),
+        q_max=q_max.mean(),
     )
 
     return (rngs, agent_state, opts), metrics
