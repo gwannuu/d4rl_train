@@ -8,12 +8,7 @@ from collections import namedtuple
 from dataclasses import dataclass
 from pathlib import Path
 
-from utils.jax import (
-    nnx_conditional_jit,
-    restore_state,
-    save_state,
-    sym
-)
+from utils.jax import nnx_conditional_jit, restore_state, save_state, sym
 
 os.environ["XLA_FLAGS"] = "--xla_gpu_deterministic_ops=true --xla_gpu_autotune_level=0"
 os.environ["TF_DETERMINISTIC_OPS"] = "1"
@@ -39,9 +34,9 @@ from dataset.antmaze_v2 import (
 )
 from utils.config import generate_experiment_hash
 
-wandb_log: bool = True
-wandb_notes: str = "Add lagrangian dual & importance sampling"
-wandb_tags: list[str] = ["cql"]
+wandb_log: bool = False
+wandb_notes: str | None = None
+wandb_tags: list[str] = ["cql_w", "First training"]
 wandb_project: str = "d4rl_train"
 wandb_group_id: str | None = None
 machine_name: str = os.environ["MACHINE_NAME"]
@@ -50,7 +45,9 @@ eval_interval: int = 50_000
 model_save: bool = True
 model_save_interval: int = 500_000
 debug: bool = False
-dataset_dir: str = os.environ["DATASET_DIR"]  # Set this to your local AntMaze dataset directory.
+dataset_dir: str = os.environ[
+    "DATASET_DIR"
+]  # Set this to your local AntMaze dataset directory.
 DEFAULT_DATASET: str = "antmaze-large-diverse-v2"
 
 
@@ -66,6 +63,7 @@ class Config:
     # cql_lagrange: bool = False
     # cql_importance_sampling: bool = True
     # q_learning_backup_entropy: bool = False
+    train_alpha_prime: bool = False
     seed: int = 4212
     num_critics: int = 2
     num_updates: int = 1_000_000
@@ -74,9 +72,9 @@ class Config:
     gamma: float = 0.99
     cql_temperature: float = 1.0
     # cql_min_q_weight: float = 5.0
-    actor_lr: float = 3e-5
-    q_lr: float = 1e-4
-    alpha_prime_lr: float = 3e-4
+    actor_lr: float = 3e-5  # 3e-5, 1e-4, 3e-4
+    q_lr: float = 1e-4  # 1e-4, 3e-4
+    alpha_prime_lr: float = 3e-4  # 3e-5, 1e-4, 3e-4
     num_action_sample: int = 10
     # cql_target_gap_expansion: float = 5.0
 
@@ -273,7 +271,6 @@ def prepare_training(config: Config):
     rngs = nnx.Rngs(params=config.seed, random=config.seed + 1)
     env = vector.make(config.dataset, num_envs=config.eval_workers, asynchronous=False)
 
-
     dataset_dict = _load_local_dataset(config.dataset)
     dataset = Transition(
         obs=jnp.array(dataset_dict["observations"]),
@@ -362,7 +359,6 @@ def train_batch(
 
     batch, _ = batch_sampler(dataset)
 
-
     def actor_loss_fn(actor_net_param: TanhGaussianPolicy):
         pi = actor_net_param(batch.obs)
         sampled_action, log_pi = pi.sample_and_log_prob(seed=key)
@@ -400,16 +396,23 @@ def train_batch(
     target = batch.reward + config.gamma * (1 - batch.done) * next_q
 
     pi_sample_keys = jax.random.split(rngs.random(), config.num_action_sample)
-    pi_actions, _  = jax.vmap(sample_pi_action_log_prob, in_axes=(0, None), out_axes=0)(pi_sample_keys, batch.obs)
+    pi_actions, _ = jax.vmap(sample_pi_action_log_prob, in_axes=(0, None), out_axes=0)(
+        pi_sample_keys, batch.obs
+    )
 
     def q_loss_fn(q_net: VectorQ):
+        distance_gap = jnp.linalg.vector_norm(pi_actions - batch.action, axis=-1).mean(
+            0
+        )
         beta_q = q_net(batch.obs, batch.action)
-        critic_loss = jnp.square((beta_q - jnp.expand_dims(target, -1)))
+        # target = target - distance_gap
+        critic_loss = jnp.square(
+            (
+                beta_q
+                - jnp.expand_dims(target - log_alpha_prime_net.exp() * distance_gap, -1)
+            )
+        )
         critic_loss = critic_loss.sum(-1).mean()
-
-        # Loop to avoid nested vmaps that fragment the matmul contracting dimension.
-        distance_gap = jnp.linalg.vector_norm(pi_actions - batch.action, axis=-1).mean()
-        critic_loss += log_alpha_prime_net.exp() * distance_gap
         return critic_loss, distance_gap
 
     q_loss_grad = nnx.value_and_grad(q_loss_fn, has_aux=True)
@@ -417,18 +420,26 @@ def train_batch(
     q_opt.update(grads=critic_grad)
     new_q = q_opt.model
 
-    alpha_prime_loss = None
     # alpha_prime_value = jnp.array(config.cql_min_q_weight, dtype=jnp.float32)
-    new_log_alpha_prime_net = None
 
-    def alpha_prime_loss_fn(log_alpha_prime_param: LogScalar):
-        return -jnp.exp(log_alpha_prime_param()) * jax.lax.stop_gradient(distance_gap)
+    alpha_prime_loss = None
+    alpha_prime = None
+    if config.train_alpha_prime:
 
-    alpha_prime_grad_fn = nnx.value_and_grad(alpha_prime_loss_fn)
-    alpha_prime_loss, alpha_prime_grad = alpha_prime_grad_fn(log_alpha_prime_net)
-    log_alpha_prime_opt.update(grads=alpha_prime_grad)
-    new_log_alpha_prime_net = log_alpha_prime_opt.model
-    alpha_prime = new_log_alpha_prime_net.exp()
+        def alpha_prime_loss_fn(log_alpha_prime_param: LogScalar):
+            return -jnp.exp(log_alpha_prime_param()) * jax.lax.stop_gradient(
+                distance_gap
+            )
+
+        alpha_prime_grad_fn = nnx.value_and_grad(alpha_prime_loss_fn)
+        alpha_prime_loss, alpha_prime_grad = alpha_prime_grad_fn(log_alpha_prime_net)
+        log_alpha_prime_opt.update(grads=alpha_prime_grad)
+        new_log_alpha_prime_net = log_alpha_prime_opt.model
+        alpha_prime = new_log_alpha_prime_net.exp()
+
+    else:
+        new_log_alpha_prime_net = log_alpha_prime_net
+        alpha_prime = new_log_alpha_prime_net.exp()
 
     # Polyak (soft) update target params toward updated online Q params
     q_target_net_param = optax.incremental_update(
@@ -452,7 +463,7 @@ def train_batch(
 
     metrics = Metrics(
         critic_loss=critic_loss,
-        gap_distance = distance_gap,
+        gap_distance=distance_gap,
         actor_loss=actor_loss,
         alpha_prime_loss=alpha_prime_loss,
         entropy=entropy.mean(),
