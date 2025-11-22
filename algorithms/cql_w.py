@@ -1,19 +1,23 @@
 import dataclasses
 import getpass
+import math
 import os
 import random
 import socket
 from collections import namedtuple
-import math
 from dataclasses import dataclass
 from pathlib import Path
 
-from utils.jax import sym
+from utils.jax import (
+    nnx_conditional_jit,
+    restore_state,
+    save_state,
+    sym
+)
 
 os.environ["XLA_FLAGS"] = "--xla_gpu_deterministic_ops=true --xla_gpu_autotune_level=0"
 os.environ["TF_DETERMINISTIC_OPS"] = "1"
 
-import d4rl
 import distrax
 import flax.nnx as nnx
 import gym
@@ -26,14 +30,14 @@ import orbax.checkpoint as ocp
 from flax.nnx.nn.initializers import constant
 from tqdm.auto import tqdm
 
+import d4rl
 import wandb
-from utils.config import generate_experiment_hash
-from utils.jax import nnx_conditional_jit, restore_state, save_state
 from dataset.antmaze_v2 import (
     ANTMAZE_DATASETS,
     get_dataset_file_path,
     load_dataset_from_file,
 )
+from utils.config import generate_experiment_hash
 
 wandb_log: bool = True
 wandb_notes: str = "Add lagrangian dual & importance sampling"
@@ -59,9 +63,9 @@ class Config:
     )
 
     # Train
-    cql_lagrange: bool = False
-    cql_importance_sampling: bool = True
-    q_learning_backup_entropy: bool = False
+    # cql_lagrange: bool = False
+    # cql_importance_sampling: bool = True
+    # q_learning_backup_entropy: bool = False
     seed: int = 4212
     num_critics: int = 2
     num_updates: int = 1_000_000
@@ -69,12 +73,12 @@ class Config:
     batch_size: int = 256
     gamma: float = 0.99
     cql_temperature: float = 1.0
-    cql_min_q_weight: float = 5.0
+    # cql_min_q_weight: float = 5.0
     actor_lr: float = 3e-5
     q_lr: float = 1e-4
     alpha_prime_lr: float = 3e-4
     num_action_sample: int = 10
-    cql_target_gap_expansion: float = 5.0
+    # cql_target_gap_expansion: float = 5.0
 
     # Eval
     eval_workers: int = 8
@@ -86,7 +90,7 @@ Transition = namedtuple("Transition", "obs action reward next_obs done")
 
 Metrics = namedtuple(
     "Metrics",
-    "critic_loss gap_mean gap_residual actor_loss alpha_prime_loss entropy alpha_prime q_min q_std q_max",
+    "critic_loss gap_distance actor_loss alpha_prime_loss entropy alpha_prime q_min q_std q_max",
 )
 EvalMetrics = namedtuple("EvalMetrics", "avg_return score score_std")
 
@@ -300,7 +304,7 @@ def initialize_network(config: Config, rngs: nnx.Rngs, env: vector.VectorEnv):
         rngs=rngs,
     )
     q_target_net = nnx.clone(q_net)
-    alpha_prime = LogScalar() if config.cql_lagrange else None
+    alpha_prime = LogScalar()
     return actor_net, q_net, q_target_net, alpha_prime
 
 
@@ -339,10 +343,6 @@ def train_batch(
     actor_opt = opts.actor
     q_opt = opts.q
     alpha_prime_opt = opts.alpha_prime
-
-    assert config.cql_lagrange == (
-        alpha_prime_net is not None and alpha_prime_opt is not None
-    )
 
     # draw one key for this call and split into many subkeys used below
     key = rngs.random()
@@ -385,11 +385,13 @@ def train_batch(
         param = nnx.filter_state(state, nnx.Param)
         return param
 
-    bs = batch.next_obs.shape[0]
+    def sample_pi_action_log_prob(rng_key, obs):
+        pi = new_actor_net(obs)
+        action, log_pi = pi.sample_and_log_prob(seed=rng_key)
+        return action, log_pi
 
     def _sample_next_q(rng_key, next_obs):
-        next_pi = new_actor_net(next_obs)
-        next_action, log_next_pi = next_pi.sample_and_log_prob(seed=rng_key)
+        next_action, log_next_pi = sample_pi_action_log_prob(rng_key, next_obs)
         next_q = q_target_net(next_obs, next_action)
         next_q = next_q.min(-1)
         return next_q
@@ -398,110 +400,36 @@ def train_batch(
     next_q = jax.lax.stop_gradient(next_q)
     target = batch.reward + config.gamma * (1 - batch.done) * next_q
 
-    key_pi, key_next_pi, key_cql = jax.random.split(key, 3)
-
-    def _sample_actions(rng_key, obs):
-        pi = new_actor_net(obs)
-        return pi.sample_and_log_prob(seed=rng_key)
-
-    # sample actions per-batch (vectorized)
-    pi_actions, log_prob = jax.vmap(lambda k, o: _sample_actions(k, o))(
-        jax.random.split(key_pi, bs), batch.obs
-    )
-    pi_next_actions, next_log_prob = jax.vmap(lambda k, o: _sample_actions(k, o))(
-        jax.random.split(key_next_pi, bs), batch.next_obs
-    )
-
-    # https://github.com/aviralkumar2907/CQL/blob/d67dbe9cf5d2b96e3b462b6146f249b3d6569796/d4rl/rlkit/torch/sac/cql.py#L139
-    # https://github.com/young-geng/JaxCQL/blob/bac4299194bd6ae2bc7db9034fd1a31ac43a30d7/JaxCQL/conservative_sac.py#L214
-    # https://github.com/EmptyJackson/unifloral/blob/0ac6fb73590436efc29214601bef12c8ab23fae3/algorithms/cql.py#L286
-    cql_random_actions = jax.random.uniform(
-        key_cql,
-        shape=(batch.action.shape[0], config.num_action_sample, batch.action.shape[1]),
-        minval=-1.0,
-        maxval=1.0,
-    )
+    pi_sample_keys = jax.random.split(rngs.random(), config.num_action_sample)
+    pi_actions, _  = jax.vmap(sample_pi_action_log_prob, in_axes=(0, None), out_axes=0)(pi_sample_keys, batch.obs)
 
     def q_loss_fn(q_net: VectorQ):
-        if not config.cql_importance_sampling:
-            raise NotImplementedError
-
-        # https://github.com/aviralkumar2907/CQL/blob/d67dbe9cf5d2b96e3b462b6146f249b3d6569796/d4rl/rlkit/torch/sac/cql.py#L254
-        # https://github.com/EmptyJackson/unifloral/blob/0ac6fb73590436efc29214601bef12c8ab23fae3/algorithms/cql.py#L297
         beta_q = q_net(batch.obs, batch.action)
         critic_loss = jnp.square((beta_q - jnp.expand_dims(target, -1)))
         critic_loss = critic_loss.sum(-1).mean()
 
         # Loop to avoid nested vmaps that fragment the matmul contracting dimension.
-        log_uniform = jnp.log(0.5 ** batch.action.shape[-1])
-        rand_q_list = []
-        for i in range(config.num_action_sample):
-            rand_q_i = q_net(batch.obs, cql_random_actions[:, i, :]) - log_uniform
-            rand_q_list.append(rand_q_i)
-        rand_q = jnp.stack(rand_q_list, axis=0)
-        # Flatten (batch, samples) axes to avoid nested vmaps that fragment matmuls
-        # b, n, a_dim = cql_random_actions.shape
-        # actions_flat = cql_random_actions.reshape(n * b, a_dim)
-        # obs_repeat = jnp.repeat(batch.obs, n, axis=0)
-        # rand_q_flat = q_net(obs_repeat, actions_flat)
-        # rand_q = rand_q_flat.reshape(b, n, -1).transpose(1, 0, 2)
-        # pi_q = jnp.expand_dims(q_net(batch.obs, pi_actions), 0).repeat(
-        #     config.num_action_sample, axis=0
-        # )
-        # next_pi_q = jnp.expand_dims(q_net(batch.next_obs, pi_next_actions), 0).repeat(
-        #     config.num_action_sample, axis=0
-        # )
-
-        log_pi = log_prob.sum(-1, keepdims=True)
-        pi_q_base = q_net(batch.obs, pi_actions) - log_pi
-        pi_q = jnp.expand_dims(pi_q_base, axis=0).repeat(
-            config.num_action_sample, axis=0
-        )
-
-        log_next_pi = next_log_prob.sum(-1, keepdims=True)
-        next_pi_q_base = q_net(batch.next_obs, pi_next_actions) - log_next_pi
-        next_pi_q = jnp.expand_dims(next_pi_q_base, axis=0).repeat(
-            config.num_action_sample, axis=0
-        )
-
-        all_qs = jnp.concatenate([rand_q, pi_q, next_pi_q], axis=0)
-        q_ood = (
-            jax.scipy.special.logsumexp(all_qs / config.cql_temperature, axis=0)
-            * config.cql_temperature
-        )
-        q_gap = q_ood - beta_q
-        gap_mean = q_gap.sum(-1).mean()
-
-        if config.cql_lagrange:
-            lagrange_multiplier = jnp.exp(alpha_prime_net())
-            gap_residual = gap_mean - config.cql_target_gap_expansion
-            min_q_loss = lagrange_multiplier * gap_residual
-        else:
-            gap_residual = gap_mean
-            min_q_loss = config.cql_min_q_weight * gap_mean
-
-        critic_loss += min_q_loss
-        return critic_loss, (gap_mean, gap_residual)
+        distance_gap = jnp.linalg.vector_norm(pi_actions - batch.action, axis=-1).mean()
+        critic_loss += alpha_prime_net.exp() * distance_gap
+        return critic_loss, distance_gap
 
     q_loss_grad = nnx.value_and_grad(q_loss_fn, has_aux=True)
-    (critic_loss, (gap_mean, gap_residual)), critic_grad = q_loss_grad(q_net)
+    (critic_loss, distance_gap), critic_grad = q_loss_grad(q_net)
     q_opt.update(grads=critic_grad)
     new_q = q_opt.model
 
     alpha_prime_loss = None
-    alpha_prime_value = jnp.array(config.cql_min_q_weight, dtype=jnp.float32)
+    # alpha_prime_value = jnp.array(config.cql_min_q_weight, dtype=jnp.float32)
     new_alpha_prime_net = None
 
-    if config.cql_lagrange:
+    def alpha_prime_loss_fn(alpha_prime_param: LogScalar):
+        return -alpha_prime_param() * jax.lax.stop_gradient(distance_gap)
 
-        def alpha_prime_loss_fn(alpha_prime_param: LogScalar):
-            return -alpha_prime_param() * jax.lax.stop_gradient(gap_residual)
-
-        alpha_prime_grad_fn = nnx.value_and_grad(alpha_prime_loss_fn)
-        alpha_prime_loss, alpha_prime_grad = alpha_prime_grad_fn(alpha_prime_net)
-        alpha_prime_opt.update(grads=alpha_prime_grad)
-        new_alpha_prime_net = alpha_prime_opt.model
-        alpha_prime_value = new_alpha_prime_net.exp()
+    alpha_prime_grad_fn = nnx.value_and_grad(alpha_prime_loss_fn)
+    alpha_prime_loss, alpha_prime_grad = alpha_prime_grad_fn(alpha_prime_net)
+    alpha_prime_opt.update(grads=alpha_prime_grad)
+    new_alpha_prime_net = alpha_prime_opt.model
+    alpha_prime_value = new_alpha_prime_net.exp()
 
     # Polyak (soft) update target params toward updated online Q params
     q_target_net_param = optax.incremental_update(
@@ -525,8 +453,7 @@ def train_batch(
 
     metrics = Metrics(
         critic_loss=critic_loss,
-        gap_mean=gap_mean,
-        gap_residual=gap_residual,
+        gap_distance = distance_gap,
         actor_loss=actor_loss,
         alpha_prime_loss=alpha_prime_loss,
         entropy=entropy.mean(),
