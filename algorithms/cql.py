@@ -36,8 +36,8 @@ from dataset.antmaze_v2 import (
 )
 
 wandb_log: bool = True
-wandb_notes: str = "Add lagrangian dual & importance sampling"
-wandb_tags: list[str] = ["cql"]
+wandb_notes: str | None = None
+wandb_tags: list[str] = ["cql", "Add lagrangian dual & importance sampling"]
 wandb_project: str = "d4rl_train"
 wandb_group_id: str | None = None
 machine_name: str = os.environ["MACHINE_NAME"]
@@ -46,7 +46,7 @@ eval_interval: int = 50_000
 model_save: bool = True
 model_save_interval: int = 500_000
 debug: bool = False
-dataset_dir: str = os.environ["DATASET_DIR"]  # Set this to your local AntMaze dataset directory.
+dataset_dir: str = os.environ["DATASET_DIR"]
 DEFAULT_DATASET: str = "antmaze-large-diverse-v2"
 
 
@@ -69,11 +69,11 @@ class Config:
     batch_size: int = 256
     gamma: float = 0.99
     cql_temperature: float = 1.0
-    cql_min_q_weight: float = 5.0
-    actor_lr: float = 3e-5
-    q_lr: float = 1e-4
-    alpha_lr: float = 3e-4
-    alpha_prime_lr: float = 3e-4
+    cql_min_q_weight: float = (
+        5.0  # 5.0 10.0 https://github.com/aviralkumar2907/CQL/tree/master
+    )
+    actor_lr: float = 3e-5  # 3e-5, 1e-4, 3e-4 Appendix E
+    q_lr: float = 3e-4  #  1e-4, 3e-4 Appendix E
     num_action_sample: int = 10
     cql_target_gap_expansion: float = 5.0
 
@@ -269,7 +269,6 @@ def _load_local_dataset(env_id: str) -> dict[str, np.ndarray]:
 def prepare_training(config: Config):
     rngs = nnx.Rngs(params=config.seed, random=config.seed + 1)
     env = vector.make(config.dataset, num_envs=config.eval_workers, asynchronous=False)
-
 
     dataset_dict = _load_local_dataset(config.dataset)
     dataset = Transition(
@@ -510,15 +509,13 @@ def train_batch(
     new_q = q_opt.model
 
     alpha_prime_loss = 0
-    alpha_prime= config.cql_min_q_weight
+    alpha_prime = config.cql_min_q_weight
     new_log_alpha_prime_net = None
 
     if config.cql_lagrange:
 
         def alpha_prime_loss_fn(log_alpha_prime_net: LogScalar):
-            return -jnp.exp(log_alpha_prime_net()) * jax.lax.stop_gradient(
-                gap_residual
-            )
+            return -jnp.exp(log_alpha_prime_net()) * jax.lax.stop_gradient(gap_residual)
 
         alpha_prime_grad_fn = nnx.value_and_grad(alpha_prime_loss_fn)
         alpha_prime_loss, alpha_prime_grad = alpha_prime_grad_fn(log_alpha_prime_net)
@@ -776,9 +773,9 @@ def main(sweep=False):
 
     actor_opt = nnx.Optimizer(actor_net, optax.adam(learning_rate=config.actor_lr))
     q_opt = nnx.Optimizer(q_net, optax.adam(learning_rate=config.q_lr))
-    log_alpha_opt = nnx.Optimizer(log_alpha, optax.adam(learning_rate=config.alpha_lr))
+    log_alpha_opt = nnx.Optimizer(log_alpha, optax.adam(learning_rate=config.actor_lr))
     log_alpha_prime_opt = (
-        nnx.Optimizer(log_alpha_prime, optax.adam(learning_rate=config.alpha_prime_lr))
+        nnx.Optimizer(log_alpha_prime, optax.adam(learning_rate=config.q_lr))
         if log_alpha_prime is not None
         else None
     )
