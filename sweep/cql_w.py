@@ -33,10 +33,9 @@ if not sweep_id:
         "name": "sweep",
         "metric": {"goal": "maximize", "name": "valid/score"},
         "parameters": {
-            "seed": {
-                "values": [20251, 30251, 40251, 50251, 60251, 70251, 80251, 90251]
-            },
             # "batch_size": {"values": [256]},
+            "alpha_prime_lr": {"values": [1e-4, 3e-4]},
+            "num_action_sample": {"values": [24, 8]},
             "dataset": {
                 "values": [
                     "antmaze-large-diverse-v2",
@@ -47,10 +46,9 @@ if not sweep_id:
                     "antmaze-umaze-diverse-v2",
                 ]
             },
-            "q_lr": {"values": [1e-4, 3e-4]},
-            "actor_lr": {"values": [3e-5, 1e-4, 3e-4]},
-            "alpha_prime_lr": {"values": [3e-5, 1e-4, 3e-4]},
-            "num_action_sample": {"values": [25, 10, 5, 2]},
+            "seed": {"values": [20251, 30251, 40251, 50251]},
+            "q_lr": {"values": [3e-4]},
+            "actor_lr": {"values": [3e-5, 1e-4]},
             # "cql_importance_sampling": {"values": [True, False]},
             # "cql_lagrange": {"values": [True, False]},
             # "cql_target_gap_expansion": {"values": [5.0, 10.0]},
