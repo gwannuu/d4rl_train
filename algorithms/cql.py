@@ -29,7 +29,7 @@ from tqdm.auto import tqdm
 import wandb
 from utils.config import generate_experiment_hash
 from utils.jax import nnx_conditional_jit, restore_state, save_state
-from dataset.antmaze_v2 import dataset as antmaze_datasets
+from dataset.antmaze_v2 import ANTMAZE_DATASETS
 
 wandb_log: bool = True
 wandb_notes: str = "Add lagrangian dual & importance sampling"
@@ -47,7 +47,7 @@ debug: bool = False
 @dataclass(frozen=True)
 class Config:
     # Metadata
-    dataset: str = antmaze_datasets[0]
+    dataset: str = ANTMAZE_DATASETS["antmaze-large-diverse-v2"]
     hidden_layers: tuple[int, ...] = dataclasses.field(
         default_factory=lambda: (256, 256, 256)
     )
