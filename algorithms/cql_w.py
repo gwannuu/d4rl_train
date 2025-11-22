@@ -64,6 +64,7 @@ class Config:
     # cql_importance_sampling: bool = True
     # q_learning_backup_entropy: bool = False
     train_alpha_prime: bool = False
+    alpha_prime: float = 0.01  # 0.01, 0.1, 1.0, 10.0
     seed: int = 4212
     num_critics: int = 2
     num_updates: int = 1_000_000
@@ -301,7 +302,7 @@ def initialize_network(config: Config, rngs: nnx.Rngs, env: vector.VectorEnv):
         rngs=rngs,
     )
     q_target_net = nnx.clone(q_net)
-    log_alpha_prime = LogScalar()
+    log_alpha_prime = LogScalar(ent_coef_init=config.alpha_prime)
     return actor_net, q_net, q_target_net, log_alpha_prime
 
 
@@ -690,7 +691,7 @@ def main(sweep=False):
     q_opt = nnx.Optimizer(q_net, optax.adam(learning_rate=config.q_lr))
     log_alpha_prime_opt = (
         nnx.Optimizer(log_alpha_prime, optax.adam(learning_rate=config.alpha_prime_lr))
-        if log_alpha_prime is not None
+        if config.train_alpha_prime
         else None
     )
 
