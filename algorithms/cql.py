@@ -73,6 +73,7 @@ class Config:
     actor_lr: float = 3e-5
     q_lr: float = 1e-4
     alpha_lr: float = 3e-4
+    alpha_prime_lr: float = 3e-4
     num_action_sample: int = 10
     cql_target_gap_expansion: float = 5.0
 
@@ -777,7 +778,7 @@ def main(sweep=False):
     q_opt = nnx.Optimizer(q_net, optax.adam(learning_rate=config.q_lr))
     log_alpha_opt = nnx.Optimizer(log_alpha, optax.adam(learning_rate=config.alpha_lr))
     log_alpha_prime_opt = (
-        nnx.Optimizer(log_alpha_prime, optax.adam(learning_rate=config.alpha_lr))
+        nnx.Optimizer(log_alpha_prime, optax.adam(learning_rate=config.alpha_prime_lr))
         if log_alpha_prime is not None
         else None
     )
