@@ -1,18 +1,14 @@
-from functools import partial
 import os
+from functools import partial
+
 import wandb
-
 from algorithms import cql_w as cql_w_module
-from dataset.antmaze_v2 import (
-    ANTMAZE_DATASETS,
-    check_and_load_datasets,
-    get_dataset_file_path,
-)
-
+from utils.file import clear_ckpt_dir
 
 sweep_id: str | None = None
 cuda_visible_devices: int = -1
 dataset_dir: str | None = cql_w_module.dataset_dir
+
 
 if cuda_visible_devices == -1 and sweep_id is None:
     raise RuntimeError(
@@ -26,6 +22,8 @@ if dataset_dir is None:
 
 assert cuda_visible_devices != -1
 os.environ["CUDA_VISIBLE_DEVICES"] = f"{cuda_visible_devices}"
+
+clear_ckpt_dir()
 
 if not sweep_id:
     sweep_configuration = {
