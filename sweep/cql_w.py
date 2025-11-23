@@ -23,7 +23,7 @@ if dataset_dir is None:
 assert cuda_visible_devices != -1
 os.environ["CUDA_VISIBLE_DEVICES"] = f"{cuda_visible_devices}"
 
-clear_ckpt_dir()
+# clear_ckpt_dir()
 
 if not sweep_id:
     sweep_configuration = {
