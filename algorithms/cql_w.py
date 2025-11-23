@@ -63,6 +63,8 @@ class Config:
     # cql_lagrange: bool = False
     # cql_importance_sampling: bool = True
     # q_learning_backup_entropy: bool = False
+    alpha: float = 1.0
+    train_alpha: bool = True
     train_alpha_prime: bool = True
     alpha_prime: float = 0.01  # 0.01, 0.1, 1.0, 10.0
     seed: int = 4212
@@ -74,23 +76,25 @@ class Config:
     cql_temperature: float = 1.0
     # cql_min_q_weight: float = 5.0
     actor_lr: float = 3e-5  # 3e-5, 1e-4, 3e-4
+    alpha_lr: float = 3e-5
     q_lr: float = 1e-4  # 1e-4, 3e-4
     alpha_prime_lr: float = 3e-4  # 3e-5, 1e-4, 3e-4
     num_action_sample: int = 10
     # cql_target_gap_expansion: float = 5.0
     target_gap: float = 1.0
+    target_kl: float = 1.0
 
     # Eval
     eval_workers: int = 8
 
 
-Models = namedtuple("Models", "actor vec_q vec_q_target log_alpha_prime")
-Opts = namedtuple("Opts", "actor q log_alpha_prime")
+Models = namedtuple("Models", "actor vec_q vec_q_target log_alpha log_alpha_prime")
+Opts = namedtuple("Opts", "actor q log_alpha log_alpha_prime")
 Transition = namedtuple("Transition", "obs action reward next_obs done")
 
 Metrics = namedtuple(
     "Metrics",
-    "critic_loss gap_distance gap_distance_std target_gap actor_loss alpha_prime_loss entropy alpha_prime q_min q_std q_max",
+    "critic_loss gap_distance gap_distance_std target_gap actor_loss alpha alpha_loss alpha_prime_loss entropy alpha_prime q_min q_std q_max kl_proxy",
 )
 EvalMetrics = namedtuple("EvalMetrics", "avg_return score score_std")
 
@@ -303,8 +307,9 @@ def initialize_network(config: Config, rngs: nnx.Rngs, env: vector.VectorEnv):
         rngs=rngs,
     )
     q_target_net = nnx.clone(q_net)
+    log_alpha = LogScalar(ent_coef_init=config.alpha)
     log_alpha_prime = LogScalar(ent_coef_init=config.alpha_prime)
-    return actor_net, q_net, q_target_net, log_alpha_prime
+    return actor_net, q_net, q_target_net, log_alpha, log_alpha_prime
 
 
 def get_all_array_stats(
@@ -337,10 +342,12 @@ def train_batch(
     actor_net = agent_state.actor
     q_net = agent_state.vec_q
     q_target_net = agent_state.vec_q_target
+    log_alpha_net = agent_state.log_alpha
     log_alpha_prime_net = agent_state.log_alpha_prime
 
     actor_opt = opts.actor
     q_opt = opts.q
+    log_alpha_opt = opts.log_alpha
     log_alpha_prime_opt = opts.log_alpha_prime
     # draw one key for this call and split into many subkeys used below
     key = rngs.random()
@@ -361,7 +368,10 @@ def train_batch(
 
     batch, _ = batch_sampler(dataset)
 
+    # Train policy network
     def actor_loss_fn(actor_net_param: TanhGaussianPolicy):
+        kl_proxy = None
+
         pi = actor_net_param(batch.obs)
         sampled_action, log_pi = pi.sample_and_log_prob(seed=key)
         log_pi = log_pi.sum(-1)
@@ -369,11 +379,20 @@ def train_batch(
         q_min = jnp.min(q_values, axis=-1)
         q_std = jnp.std(q_values, axis=-1)
         q_max = jnp.max(q_values, axis=-1)
+
         loss = -q_min.mean()
-        return loss, (-log_pi, q_min, q_std, q_max)
+        if config.train_alpha:
+            action_clipped = jnp.clip(batch.action, -0.9999, 0.9999)
+            log_beta = pi.log_prob(action_clipped).sum(-1)
+            kl_proxy =  (-log_beta + log_pi).mean()
+            alpha_prime = log_alpha_net.exp()
+
+            loss += alpha_prime * (kl_proxy - config.target_kl)
+        return loss, (-log_pi, kl_proxy, q_min, q_std, q_max)
 
     actor_grad_fn = nnx.value_and_grad(actor_loss_fn, has_aux=True)
-    (actor_loss, (entropy, q_min, q_std, q_max)), actor_grad = actor_grad_fn(actor_net)
+    (actor_loss, (entropy, kl_proxy, q_min, q_std, q_max)), actor_grad = actor_grad_fn(actor_net)
+
     actor_opt.update(grads=actor_grad)
     new_actor_net = actor_opt.model
 
@@ -402,6 +421,7 @@ def train_batch(
         pi_sample_keys, batch.obs
     )
 
+    # Train Q networks
     def q_loss_fn(q_net: VectorQ):
         distance_gap = jnp.linalg.vector_norm(pi_actions - batch.action, axis=-1).mean(
             0
@@ -424,8 +444,28 @@ def train_batch(
 
     # alpha_prime_value = jnp.array(config.cql_min_q_weight, dtype=jnp.float32)
 
+
+    # Train alpha
+    alpha = None
+    alpha_loss = None
+    if config.train_alpha:
+        def alpha_loss_fn(log_alpha_param: LogScalar):
+            alpha = jnp.exp(log_alpha_param())
+            loss = -alpha * jax.lax.stop_gradient(kl_proxy - config.target_kl)
+            return loss.mean()
+
+        alpha_grad_fn = nnx.value_and_grad(alpha_loss_fn)
+        alpha_loss, alpha_grad = alpha_grad_fn(log_alpha_net)
+        log_alpha_opt.update(grads=alpha_grad)
+        new_log_alpha_net = log_alpha_opt.model
+    else:
+        new_log_alpha_net = log_alpha_net
+    alpha = new_log_alpha_net.exp()
+
     alpha_prime_loss = None
     alpha_prime = None
+
+    # Train alpha prime
     if config.train_alpha_prime:
 
         def alpha_prime_loss_fn(log_alpha_prime_param: LogScalar):
@@ -456,22 +496,30 @@ def train_batch(
         actor=new_actor_net,
         vec_q=new_q,
         vec_q_target=q_target_net,
+        log_alpha=new_log_alpha_net,
         log_alpha_prime=new_log_alpha_prime_net,
     )
     opts = Opts(
         actor=actor_opt,
         q=q_opt,
+        log_alpha=log_alpha_opt,
         log_alpha_prime=log_alpha_prime_opt,
     )
 
+
+    if kl_proxy is not None:
+        kl_proxy = kl_proxy.mean()
     metrics = Metrics(
         critic_loss=critic_loss,
         gap_distance=distance_gap.mean(),
         gap_distance_std=distance_gap.std(),
         target_gap=config.target_gap,
+        kl_proxy=kl_proxy.mean(),
         actor_loss=actor_loss,
+        alpha_loss=alpha_loss,
         alpha_prime_loss=alpha_prime_loss,
         entropy=entropy.mean(),
+        alpha=alpha,
         alpha_prime=alpha_prime,
         q_min=q_min.mean(),
         q_std=q_std.mean(),
@@ -686,12 +734,15 @@ def main(sweep=False):
 
     rngs, env, dataset = prepare_training(config)
     env.seed(config.seed)
-    actor_net, q_net, q_target_net, log_alpha_prime = initialize_network(
+    actor_net, q_net, q_target_net, log_alpha, log_alpha_prime = initialize_network(
         config, rngs, env
     )
 
     actor_opt = nnx.Optimizer(actor_net, optax.adam(learning_rate=config.actor_lr))
     q_opt = nnx.Optimizer(q_net, optax.adam(learning_rate=config.q_lr))
+    log_alpha_opt = (
+        nnx.Optimizer(log_alpha, optax.adam(learning_rate=config.alpha_lr)) if config.train_alpha else None
+    )
     log_alpha_prime_opt = (
         nnx.Optimizer(log_alpha_prime, optax.adam(learning_rate=config.alpha_prime_lr))
         if config.train_alpha_prime
@@ -702,11 +753,13 @@ def main(sweep=False):
         actor=actor_net,
         vec_q=q_net,
         vec_q_target=q_target_net,
+        log_alpha=log_alpha,
         log_alpha_prime=log_alpha_prime,
     )
     opts = Opts(
         actor=actor_opt,
         q=q_opt,
+        log_alpha=log_alpha_opt,
         log_alpha_prime=log_alpha_prime_opt,
     )
     len_dataset = len(dataset.obs)
