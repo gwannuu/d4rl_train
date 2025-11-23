@@ -7,6 +7,7 @@ import wandb
 from algorithms import cql as cql_module
 from utils.file import clear_ckpt_dir
 
+
 sweep_id: str | None = None
 cuda_visible_devices: int = -1
 dataset_dir: str | None = cql_module.dataset_dir
@@ -34,8 +35,7 @@ if not sweep_id:
         "metric": {"goal": "maximize", "name": "valid/score"},
         "parameters": {
             # "batch_size": {"values": [256]},
-            # "cql_target_gap_expansion": {"values": [5.0, 10.0]},
-            "cql_min_q_weight": {"values": [5.0, 10.0]},
+            "cql_target_gap_expansion": {"values": [5.0, 10.0]},
             "dataset": {
                 "values": [
                     "antmaze-large-diverse-v2",
@@ -46,7 +46,7 @@ if not sweep_id:
                     "antmaze-umaze-diverse-v2",
                 ]
             },
-            "cql_lagrange": {"values": [False]},
+            "cql_lagrange": {"values": [True]},
             "seed": {"values": [20251, 30251, 40251, 50251]},
             "actor_lr": {"values": [3e-5]},
             "q_lr": {"values": [3e-4]},
