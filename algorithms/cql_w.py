@@ -384,14 +384,16 @@ def train_batch(
         if config.train_alpha:
             action_clipped = jnp.clip(batch.action, -0.9999, 0.9999)
             log_beta = pi.log_prob(action_clipped).sum(-1)
-            kl_proxy =  (-log_beta + log_pi).mean()
-            alpha_prime = log_alpha_net.exp()
+            kl_proxy = (-log_beta + log_pi).mean()
+            alpha = log_alpha_net.exp()
 
-            loss += alpha_prime * (kl_proxy - config.target_kl)
+            loss += alpha * (kl_proxy - config.target_kl)
         return loss, (-log_pi, kl_proxy, q_min, q_std, q_max)
 
     actor_grad_fn = nnx.value_and_grad(actor_loss_fn, has_aux=True)
-    (actor_loss, (entropy, kl_proxy, q_min, q_std, q_max)), actor_grad = actor_grad_fn(actor_net)
+    (actor_loss, (entropy, kl_proxy, q_min, q_std, q_max)), actor_grad = actor_grad_fn(
+        actor_net
+    )
 
     actor_opt.update(grads=actor_grad)
     new_actor_net = actor_opt.model
@@ -444,11 +446,11 @@ def train_batch(
 
     # alpha_prime_value = jnp.array(config.cql_min_q_weight, dtype=jnp.float32)
 
-
     # Train alpha
     alpha = None
     alpha_loss = None
     if config.train_alpha:
+
         def alpha_loss_fn(log_alpha_param: LogScalar):
             alpha = jnp.exp(log_alpha_param())
             loss = -alpha * jax.lax.stop_gradient(kl_proxy - config.target_kl)
@@ -505,7 +507,6 @@ def train_batch(
         log_alpha=log_alpha_opt,
         log_alpha_prime=log_alpha_prime_opt,
     )
-
 
     if kl_proxy is not None:
         kl_proxy = kl_proxy.mean()
@@ -741,7 +742,9 @@ def main(sweep=False):
     actor_opt = nnx.Optimizer(actor_net, optax.adam(learning_rate=config.actor_lr))
     q_opt = nnx.Optimizer(q_net, optax.adam(learning_rate=config.q_lr))
     log_alpha_opt = (
-        nnx.Optimizer(log_alpha, optax.adam(learning_rate=config.alpha_lr)) if config.train_alpha else None
+        nnx.Optimizer(log_alpha, optax.adam(learning_rate=config.alpha_lr))
+        if config.train_alpha
+        else None
     )
     log_alpha_prime_opt = (
         nnx.Optimizer(log_alpha_prime, optax.adam(learning_rate=config.alpha_prime_lr))
