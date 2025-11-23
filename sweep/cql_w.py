@@ -32,6 +32,7 @@ if not sweep_id:
         "metric": {"goal": "maximize", "name": "valid/score"},
         "parameters": {
             # "batch_size": {"values": [256]},
+            "train_alpha_prime": {"values": [False]},
             "alpha_prime": {"values": [0.3, 0.1, 0.03, 0.01, 0.003, 1e-12]},
             "num_action_sample": {"values": [10]},
             "dataset": {
