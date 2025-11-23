@@ -36,7 +36,7 @@ from utils.config import generate_experiment_hash
 
 wandb_log: bool = True
 wandb_notes: str | None = None
-wandb_tags: list[str] = ["cql_w", "First training"]
+wandb_tags: list[str] = ["cql_w", "Add lagrangian"]
 wandb_project: str = "d4rl_train"
 wandb_group_id: str | None = None
 machine_name: str = os.environ["MACHINE_NAME"]
@@ -63,7 +63,7 @@ class Config:
     # cql_lagrange: bool = False
     # cql_importance_sampling: bool = True
     # q_learning_backup_entropy: bool = False
-    train_alpha_prime: bool = False
+    train_alpha_prime: bool = True
     alpha_prime: float = 0.01  # 0.01, 0.1, 1.0, 10.0
     seed: int = 4212
     num_critics: int = 2
@@ -78,6 +78,7 @@ class Config:
     alpha_prime_lr: float = 3e-4  # 3e-5, 1e-4, 3e-4
     num_action_sample: int = 10
     # cql_target_gap_expansion: float = 5.0
+    target_gap: float = 1.0
 
     # Eval
     eval_workers: int = 8
@@ -89,7 +90,7 @@ Transition = namedtuple("Transition", "obs action reward next_obs done")
 
 Metrics = namedtuple(
     "Metrics",
-    "critic_loss gap_distance gap_distance_std actor_loss alpha_prime_loss entropy alpha_prime q_min q_std q_max",
+    "critic_loss gap_distance gap_distance_std target_gap actor_loss alpha_prime_loss entropy alpha_prime q_min q_std q_max",
 )
 EvalMetrics = namedtuple("EvalMetrics", "avg_return score score_std")
 
@@ -428,9 +429,10 @@ def train_batch(
     if config.train_alpha_prime:
 
         def alpha_prime_loss_fn(log_alpha_prime_param: LogScalar):
-            return -jnp.exp(log_alpha_prime_param()) * jax.lax.stop_gradient(
-                distance_gap
+            loss = -jnp.exp(log_alpha_prime_param()) * jax.lax.stop_gradient(
+                distance_gap - config.target_gap
             )
+            return loss.mean()
 
         alpha_prime_grad_fn = nnx.value_and_grad(alpha_prime_loss_fn)
         alpha_prime_loss, alpha_prime_grad = alpha_prime_grad_fn(log_alpha_prime_net)
@@ -466,6 +468,7 @@ def train_batch(
         critic_loss=critic_loss,
         gap_distance=distance_gap.mean(),
         gap_distance_std=distance_gap.std(),
+        target_gap=config.target_gap,
         actor_loss=actor_loss,
         alpha_prime_loss=alpha_prime_loss,
         entropy=entropy.mean(),
