@@ -32,16 +32,16 @@ if not sweep_id:
         "metric": {"goal": "maximize", "name": "valid/score"},
         "parameters": {
             # "batch_size": {"values": [256]},
-            "alpha_prime": {"values": [0.01, 0.1, 1.0, 10.0]},
-            "num_action_sample": {"values": [25, 10, 5]},
+            "alpha_prime": {"values": [0.3, 0.1, 0.03, 0.01, 0.003, 1e-12]},
+            "num_action_sample": {"values": [10]},
             "dataset": {
                 "values": [
-                    "antmaze-large-diverse-v2",
-                    "antmaze-large-play-v2",
-                    "antmaze-medium-play-v2",
-                    "antmaze-medium-diverse-v2",
                     "antmaze-umaze-v2",
                     "antmaze-umaze-diverse-v2",
+                    "antmaze-medium-play-v2",
+                    "antmaze-medium-diverse-v2",
+                    "antmaze-large-play-v2",
+                    "antmaze-large-diverse-v2",
                 ]
             },
             "seed": {"values": [20251, 30251, 40251, 50251]},
