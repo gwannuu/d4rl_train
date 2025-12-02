@@ -1,25 +1,23 @@
 import os
-import shutil
 from functools import partial
-from pathlib import Path
 
 import wandb
-from algorithms import cql as cql_module
+from algorithms import cql_w as cql_w_module
 from utils.file import clear_ckpt_dir
 
 sweep_id: str | None = None
 cuda_visible_devices: int = -1
-dataset_dir: str | None = cql_module.dataset_dir
+dataset_dir: str | None = cql_w_module.dataset_dir
 
 
 if cuda_visible_devices == -1 and sweep_id is None:
     raise RuntimeError(
-        "Set 'dataset_dir' in algorithms/cql.py before launching sweeps."
+        "Set 'dataset_dir' in algorithms/cql_w.py before launching sweeps."
     )
 
 if dataset_dir is None:
     raise RuntimeError(
-        "Set 'dataset_dir' in algorithms/cql.py before launching sweeps."
+        "Set 'dataset_dir' in algorithms/cql_w.py before launching sweeps."
     )
 
 assert cuda_visible_devices != -1
@@ -34,8 +32,12 @@ if not sweep_id:
         "metric": {"goal": "maximize", "name": "valid/score"},
         "parameters": {
             # "batch_size": {"values": [256]},
-            # "cql_target_gap_expansion": {"values": [5.0, 10.0]},
-            "cql_min_q_weight": {"values": [5.0, 10.0]},
+            "train_alpha": {"values": [True]},
+            "target_kl": {"values": [0.3, 1.0, 3.0]},
+            "train_alpha_prime": {"values": [False]},
+            # "target_gap": {"values": [0.3, 1.0, 3.0]},
+            "alpha_prime": {"values": [0.01, 0.03, 0.1]},
+            "num_action_sample": {"values": [5]},
             "dataset": {
                 "values": [
                     "antmaze-large-diverse-v2",
@@ -46,18 +48,23 @@ if not sweep_id:
                     "antmaze-umaze-diverse-v2",
                 ]
             },
-            "cql_lagrange": {"values": [False]},
             "seed": {"values": [20251, 30251, 40251, 50251]},
-            "actor_lr": {"values": [3e-5]},
             "q_lr": {"values": [3e-4]},
+            "actor_lr": {"values": [3e-5]},
+            "alpha_lr": {"values": [3e-5, 1e-4]},
+            # "cql_importance_sampling": {"values": [True, False]},
+            # "cql_lagrange": {"values": [True, False]},
+            # "cql_target_gap_expansion": {"values": [5.0, 10.0]},
             # "epochs": {"values": [5, 10, 15]},
             # "lr": {"max": 0.1, "min": 0.0001},
         },
     }
-    sweep_id = wandb.sweep(sweep=sweep_configuration, project=cql_module.wandb_project)
+    sweep_id = wandb.sweep(
+        sweep=sweep_configuration, project=cql_w_module.wandb_project
+    )
 
 wandb.agent(
     sweep_id=sweep_id,
-    function=partial(cql_module.main, sweep=True),
-    project=cql_module.wandb_project,
+    function=partial(cql_w_module.main, sweep=True),
+    project=cql_w_module.wandb_project,
 )
