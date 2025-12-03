@@ -612,6 +612,13 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/c7/53/39cd8c2f85e213fce1f32367c4bdbd3402d3bcde7d0826a1172a0f2c5cc0/gymnasium-1.2.2-py3-none-any.whl", hash = "sha256:f04ec362b1fdf73a8b327db5ef89384a3f2ba411e05d3521513414fbbb2199c8", size = 952118, upload-time = "2025-11-04T15:21:03.484Z" },
 ]
 
+[package.optional-dependencies]
+mujoco = [
+    { name = "imageio" },
+    { name = "mujoco" },
+    { name = "packaging" },
+]
+
 [[package]]
 name = "h11"
 version = "0.16.0"
@@ -1575,6 +1582,20 @@ wheels = [
 ]
 
 [[package]]
+name = "ogbench"
+version = "1.2.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "dm-control" },
+    { name = "gymnasium", extra = ["mujoco"] },
+    { name = "mujoco" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/c1/3b/7eb96fcad760dbd3e665f0cdbd58cbf5bc6159c80e94eba77d11a6946673/ogbench-1.2.0.tar.gz", hash = "sha256:ced94ddd144b05e6ecccb2f5636f8181134225e6844304c0ff7e662f7a34c4c3", size = 13002602, upload-time = "2025-10-21T07:40:40.823Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/26/79/756edb983d22d07a7c1873c6fe6cbe4ca2c90087d80f208ba9841835bce5/ogbench-1.2.0-py3-none-any.whl", hash = "sha256:96db66b2dd987182d4e811289281ce7208ee52de845c78d784f32e0c43f7ed5e", size = 8940332, upload-time = "2025-10-21T07:40:35.792Z" },
+]
+
+[[package]]
 name = "opt-einsum"
 version = "3.4.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2392,6 +2413,7 @@ name = "train-d4rl"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
+    { name = "chex" },
     { name = "cython" },
     { name = "d4rl" },
     { name = "distrax" },
@@ -2402,6 +2424,7 @@ dependencies = [
     { name = "minari", extra = ["hf"] },
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "numpy", version = "2.3.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "ogbench" },
     { name = "orbax-checkpoint" },
     { name = "orbax-export" },
     { name = "tqdm" },
@@ -2410,6 +2433,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "chex", specifier = ">=0.1.90" },
     { name = "cython", specifier = "<3" },
     { name = "d4rl", specifier = ">=1.1" },
     { name = "distrax", specifier = ">=0.1.5" },
@@ -2419,6 +2443,7 @@ requires-dist = [
     { name = "jax", extras = ["cuda12"], specifier = "==0.6.2" },
     { name = "minari", extras = ["hf"], specifier = ">=0.5.3" },
     { name = "numpy", specifier = ">=2" },
+    { name = "ogbench", specifier = ">=1.2.0" },
     { name = "orbax-checkpoint", specifier = ">=0.11.25" },
     { name = "orbax-export", specifier = ">=0.0.8" },
     { name = "tqdm", specifier = ">=4.66.0" },
