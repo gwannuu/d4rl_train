@@ -1,15 +1,12 @@
 import os
-import shutil
 from functools import partial
-from pathlib import Path
 
 import wandb
-from algorithms import cql as cql_module
-from utils.file import clear_ckpt_dir
+from train import train_d4rl as trainer
 
 sweep_id: str | None = None
 cuda_visible_devices: int = -1
-dataset_dir: str | None = cql_module.dataset_dir
+dataset_dir: str | None = trainer.dataset_dir
 
 
 if cuda_visible_devices == -1 and sweep_id is None:
@@ -54,10 +51,10 @@ if not sweep_id:
             # "lr": {"max": 0.1, "min": 0.0001},
         },
     }
-    sweep_id = wandb.sweep(sweep=sweep_configuration, project=cql_module.wandb_project)
+    sweep_id = wandb.sweep(sweep=sweep_configuration, project=trainer.wandb_project)
 
 wandb.agent(
     sweep_id=sweep_id,
-    function=partial(cql_module.main, sweep=True),
-    project=cql_module.wandb_project,
+    function=partial(trainer.main, sweep=True),
+    project=trainer.wandb_project,
 )

@@ -1,0 +1,27 @@
+program: train/sweep.py
+method: grid
+metric:
+  name: valid/score
+  goal: maximize
+parameters:
+  cql_min_q_weight:
+    values: [5.0, 10.0]
+  dataset:
+    values: [
+      "antmaze-large-diverse-v2",
+      "antmaze-large-play-v2",
+      "antmaze-medium-diverse-v2",
+      "antmaze-medium-play-v2",
+      "antmaze-small-diverse-v2",
+      "antmaze-small-play-v2"
+    ]
+  cql_lagrange:
+    values: [False]
+  seed:
+    values: [20251, 20252, 20253]
+  actor_lr:
+    values: [3e-5, 1e-4]
+  q_lr:
+    values: [3e-4, 1e-3]
+  num_updates:
+    values: [10000]

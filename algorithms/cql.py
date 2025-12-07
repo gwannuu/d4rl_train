@@ -1,10 +1,6 @@
 import dataclasses
-import getpass
 import os
-import random
-import socket
 from collections import namedtuple
-import math
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -13,27 +9,15 @@ from utils.jax import sym
 os.environ["XLA_FLAGS"] = "--xla_gpu_deterministic_ops=true --xla_gpu_autotune_level=0"
 os.environ["TF_DETERMINISTIC_OPS"] = "1"
 
-import d4rl
 import distrax
 import flax.nnx as nnx
-import gym
 import gym.vector as vector
 import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
-import orbax.checkpoint as ocp
 from flax.nnx.nn.initializers import constant
-from tqdm.auto import tqdm
-
-import wandb
-from utils.config import generate_experiment_hash
-from utils.jax import nnx_conditional_jit, restore_state, save_state
-from dataset.antmaze_v2 import (
-    ANTMAZE_DATASETS,
-    get_dataset_file_path,
-    load_dataset_from_file,
-)
+from utils.jax import nnx_conditional_jit, restore_state
 
 wandb_log: bool = True
 wandb_notes: str | None = None
@@ -79,6 +63,10 @@ class Config:
 
     # Eval
     eval_workers: int = 8
+
+    def __post_init__(self):
+        # Ensure hashable containers for JIT static arg usage.
+        object.__setattr__(self, "hidden_layers", tuple(self.hidden_layers))
 
 
 Models = namedtuple("Models", "actor vec_q vec_q_target log_alpha log_alpha_prime")
@@ -257,28 +245,7 @@ def restore_ckpt(wandb_run_id, models, opts, wandb_run, checkpointer):
 
 def _load_local_dataset(env_id: str) -> dict[str, np.ndarray]:
     """Load an offline dataset strictly from the local filesystem."""
-
-    if dataset_dir is None:
-        raise RuntimeError(
-            "Set 'dataset_dir' in algorithms/cql.py to your local dataset directory before running experiments."
-        )
-    file_path = get_dataset_file_path(env_id=env_id, dataset_dir=dataset_dir)
-    return load_dataset_from_file(file_path=file_path, env_id=env_id)
-
-
-def prepare_training(config: Config):
-    rngs = nnx.Rngs(params=config.seed, random=config.seed + 1)
-    env = vector.make(config.dataset, num_envs=config.eval_workers, asynchronous=False)
-
-    dataset_dict = _load_local_dataset(config.dataset)
-    dataset = Transition(
-        obs=jnp.array(dataset_dict["observations"]),
-        action=jnp.array(dataset_dict["actions"]),
-        reward=jnp.array(dataset_dict["rewards"]),
-        next_obs=jnp.array(dataset_dict["next_observations"]),
-        done=jnp.array(dataset_dict["terminals"]),
-    )
-    return rngs, env, dataset
+    raise RuntimeError("Dataset loading is now handled in train/train_ogbench.py.")
 
 
 def initialize_network(config: Config, rngs: nnx.Rngs, env: vector.VectorEnv):
@@ -598,271 +565,3 @@ def train_multiple_steps(
 
     assert metrics is not None
     return carry, metrics
-
-
-def evaluate_policy(
-    config: Config, env: vector.VectorEnv, actor: TanhGaussianPolicy, num_episodes: int
-):
-    # Run episodes in the vectorized env using the deterministic policy (tanh(mean))
-    obs = env.reset()
-    episode_returns = []
-    cur_returns = np.zeros(env.num_envs, dtype=float)
-    while len(episode_returns) < num_episodes:
-        obs_j = jnp.array(obs)
-        # deterministic action: tanh(mean)
-        x = actor.layer(obs_j)
-        mean = actor.mean(x)
-        action_j = jnp.tanh(mean)
-        action = np.asarray(action_j)
-        obs, reward, done, info = env.step(action)
-        cur_returns += reward
-        for i, d in enumerate(done):
-            if d:
-                episode_returns.append(float(cur_returns[i]))
-                cur_returns[i] = 0.0
-
-    scores = d4rl.get_normalized_score(config.dataset, np.array(episode_returns)) * 100
-
-    return EvalMetrics(
-        avg_return=float(np.mean(episode_returns)),
-        score=scores.mean(),
-        score_std=scores.std(),
-    )
-
-
-def evaluate(
-    config: Config,
-    models: Models,
-    env: vector.VectorEnv,
-):
-    eval_metrics = evaluate_policy(config, env, models.actor, num_episodes=env.num_envs)
-    log_data = {
-        f"valid/{k}": float(v)
-        for k, v in eval_metrics._asdict().items()
-        if v is not None
-    }
-    return log_data
-
-
-def save(
-    step: int,
-    save_root_dir: Path,
-    checkpointer: ocp.StandardCheckpointer,
-    models: Models,
-    opts: Opts,
-    wandb_run: wandb.Run | None = None,
-):
-    cur_step_dir = save_root_dir / f"{step}"
-    for name, model in models._asdict().items():
-        cur_save_dir = cur_step_dir / "model" / name
-        save_state(checkpointer=checkpointer, obj=model, path=cur_save_dir)
-
-    for name, opt in opts._asdict().items():
-        cur_save_dir = cur_step_dir / "optimizer" / name
-        save_state(checkpointer=checkpointer, obj=opt, path=cur_save_dir)
-
-    if wandb_run is not None:
-        name = wandb_run.name if wandb_run.name else wandb_run.id
-        artifact = wandb.Artifact(name=name, type="model", metadata={"step": step})
-        artifact.add_dir(local_path=str(cur_step_dir))
-        wandb_run.log_artifact(artifact, aliases=[f"{step}"])
-
-
-def _clean_dict(d):
-    return {k: v for k, v in d.items() if v is not None}
-
-
-def log_metrics(wandb_run, step, train_dict=None, eval_dict=None, state_dict=None):
-    statistics: dict = {}
-    if train_dict:
-        statistics.update(_clean_dict(train_dict))
-    if eval_dict:
-        statistics.update(_clean_dict(eval_dict))
-    if state_dict:
-        statistics.update(_clean_dict(state_dict))
-    if statistics:
-        wandb_run.log(statistics, step=step)
-
-
-def log_train(metrics: Metrics):
-    log_data = {
-        f"train/{k}": float(v) for k, v in metrics._asdict().items() if v is not None
-    }
-    return log_data
-
-
-def log_obj_stats(models: Models, opts: Opts):
-    stats = {}
-    for name, model in models._asdict().items():
-        mean, std = get_all_array_stats(model)
-
-        stats[f"params/{name}_mean"], stats[f"params/{name}_std"] = (
-            mean,
-            std,
-        )
-
-    for name, opt in opts._asdict().items():
-        (
-            stats[f"opts/{name}_mean"],
-            stats[f"opts/{name}_std"],
-        ) = get_all_array_stats(opt)
-    return stats
-
-
-def extract_experiment_metadata(config):
-    global wandb_tags
-    global machine_name
-    # git_hash = get_git_hash(length=12)
-    # wandb_tags.append(git_hash)
-    wandb_config = dataclasses.asdict(config)
-    wandb_config["metadata"] = {
-        # "git_hash": git_hash,
-        # "host": socket.gethostname(),
-        "machine_name": machine_name,
-        # "username": getpass.getuser(),
-        # "mac_address": uuid.getnode(),
-    }
-
-    exp_hash = generate_experiment_hash(config_dict=wandb_config, length=12)
-
-    return wandb_config, exp_hash
-
-
-def main(sweep=False):
-    run_params = {}
-    if sweep:
-        wandb_run = wandb.init()
-        valid_keys = {f.name for f in dataclasses.fields(Config)}
-        run_params = {k: v for k, v in wandb_run.config.items() if k in valid_keys}
-    config = Config(**run_params)
-    wandb_config, _ = extract_experiment_metadata(config=config)
-
-    wandb_run = None
-    if wandb_log:
-        wandb.login(key=os.environ["WANDB_API_KEY"])
-        wandb_run = wandb.init(
-            project=wandb_project,
-            config=wandb_config,
-            # name=f"cql/{exp_hash}",
-            notes=wandb_notes,
-            tags=wandb_tags,
-            settings=wandb.Settings(
-                resume="allow",
-                save_code=True,
-                disable_git=False,
-            ),
-            group=None if sweep else wandb_group_id,
-            # id=wandb_run_id,
-        )
-
-    save_root_dir: Path | None = None
-    if wandb_run and save:
-        name = wandb_run.name if wandb_run.name else wandb_run.id
-        save_root_dir = Path.cwd() / f"ckpt/cql/{name}"
-        Path.mkdir(save_root_dir, exist_ok=True, parents=True)
-
-    random.seed(config.seed)
-    np.random.seed(config.seed)
-    checkpointer = ocp.StandardCheckpointer()
-
-    rngs, env, dataset = prepare_training(config)
-    env.seed(config.seed)
-    actor_net, q_net, q_target_net, log_alpha, log_alpha_prime = initialize_network(
-        config, rngs, env
-    )
-
-    actor_opt = nnx.Optimizer(actor_net, optax.adam(learning_rate=config.actor_lr))
-    q_opt = nnx.Optimizer(q_net, optax.adam(learning_rate=config.q_lr))
-    log_alpha_opt = nnx.Optimizer(log_alpha, optax.adam(learning_rate=config.actor_lr))
-    log_alpha_prime_opt = (
-        nnx.Optimizer(log_alpha_prime, optax.adam(learning_rate=config.q_lr))
-        if log_alpha_prime is not None
-        else None
-    )
-
-    models = Models(
-        actor=actor_net,
-        vec_q=q_net,
-        vec_q_target=q_target_net,
-        log_alpha=log_alpha,
-        log_alpha_prime=log_alpha_prime,
-    )
-    opts = Opts(
-        actor=actor_opt,
-        q=q_opt,
-        log_alpha=log_alpha_opt,
-        log_alpha_prime=log_alpha_prime_opt,
-    )
-    len_dataset = len(dataset.obs)
-    step_length = math.gcd(eval_interval, model_save_interval, train_log_interval)
-
-    step_iterator = tqdm(
-        range(0, config.num_updates, step_length),
-        desc="Training",
-        dynamic_ncols=True,
-    )
-
-    for cur_step in step_iterator:
-        train_statistics, eval_statistics, state_statistics = None, None, None
-        if cur_step % eval_interval == 0:
-            eval_statistics = evaluate(
-                config=config,
-                models=models,
-                env=env,
-            )
-
-        if cur_step % model_save_interval == 0 and save_root_dir:
-            save(
-                step=cur_step,
-                save_root_dir=save_root_dir,
-                checkpointer=checkpointer,
-                models=models,
-                opts=opts,
-                wandb_run=wandb_run,
-            )
-
-        (rngs, models, opts), metrics = train_multiple_steps(
-            carry=(rngs, models, opts),
-            dataset=dataset,
-            config=config,
-            len_dataset=len_dataset,
-            length=step_length,
-        )
-
-        if cur_step % train_log_interval == 0 and wandb_run is not None:
-            train_statistics = log_train(metrics=metrics)
-            state_statistics = log_obj_stats(models=models, opts=opts)
-
-        if wandb_run is not None:
-            log_metrics(
-                wandb_run=wandb_run,
-                step=cur_step,
-                train_dict=train_statistics,
-                eval_dict=eval_statistics,
-                state_dict=state_statistics,
-            )
-
-    eval_statistic = evaluate(
-        config=config,
-        models=models,
-        env=env,
-    )
-    if wandb_run is not None:
-        log_metrics(
-            wandb_run=wandb_run,
-            step=config.num_updates,
-            eval_dict=eval_statistic,
-        )
-    if not debug and save_root_dir:
-        save(
-            step=config.num_updates,
-            save_root_dir=save_root_dir,
-            checkpointer=checkpointer,
-            models=models,
-            opts=opts,
-            wandb_run=wandb_run,
-        )
-
-
-if __name__ == "__main__":
-    main()
