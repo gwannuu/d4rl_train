@@ -179,8 +179,6 @@ class ShortcutModel(nnx.Module):
 
 
 class Value(nnx.Module):
-    """Value/critic network supporting ensembles."""
-
     def __init__(
         self,
         /,
@@ -209,8 +207,6 @@ class Value(nnx.Module):
         ]
 
     def __call__(self, observations, actions=None, timesteps=None):
-        """Return V(s) or Q(s, a) style estimates depending on the inputs."""
-
         obs = jnp.asarray(observations)
         if self.encoder is not None:
             obs = self.encoder(obs)
@@ -231,4 +227,4 @@ class Value(nnx.Module):
 
 
 if __name__ == "__main__":
-    load_env_and_datasets
+    pass

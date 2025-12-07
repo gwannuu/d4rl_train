@@ -20,4 +20,5 @@ dependencies = [
     "tqdm>=4.66.0",
     "ogbench>=1.2.0",
     "chex>=0.1.90",
+    "simple-parsing>=0.1.7",
 ]
