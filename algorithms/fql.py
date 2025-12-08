@@ -353,4 +353,4 @@ class FQL(nnx.Module):
             self.rngs.random(),
             (*observations.shape[: -len(self.config.obs_dims)], self.config.act_dim),
         )
-        actions = self.
+        # actions = self.
