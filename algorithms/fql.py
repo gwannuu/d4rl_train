@@ -2,6 +2,7 @@ from typing import Callable, Literal, Sequence, Any, Protocol
 
 from flax import struct
 import optax
+from dataset.ogbench_singletask import Dataset
 from train.train_ogbench import TrainConfig
 
 
@@ -13,10 +14,15 @@ import jax.numpy as jnp
 # nnx_conditional_jit is unused here; keep simple explicit jit usage.
 
 
-@struct.dataclass
-class Config(TrainConfig):
-    project_name: str = struct.field(pytree_node=False, default="d4rl_train")
-    model_type: str = struct.field(pytree_node=False, default="transformer")
+class Config(TrainConfig, struct.PyTreeNode):
+    num_updates: int
+    eval_interval: int
+    model_save_interval: int
+    train_log_interval: int
+    seed: int
+    wandb_log: bool
+    model_save: bool
+
     learning_rate: float = 1e-4
     batch_size: int = 512
     hidden_dims: tuple[int] = struct.field(
@@ -26,6 +32,13 @@ class Config(TrainConfig):
     num_ensemble: int = 2
     time_encoding: bool = True
     debug: bool = False
+
+    obs_dims: tuple[int] = struct.field(pytree_node=False, default=(-1,))
+    act_dim: int = struct.field(pytree_node=False, default=-1)
+    project_name: str = struct.field(pytree_node=False, default="d4rl_train")
+    algorithm_module: str = struct.field(pytree_node=False, default="algorithms.fql")
+    algorithm_class: str = struct.field(pytree_node=False, default="FQL")
+    dataset_name: str = struct.field(pytree_node=False, default="")
 
 
 def map_norm_fn(
@@ -243,7 +256,6 @@ class FQL(nnx.Module):
         example_action: jnp.ndarray,
     ):
         self.rngs = nnx.Rngs(default=config.seed, random=config.seed + 1)
-        self.config = config
 
         self.critic = Value(
             input_dim=example_observation.shape[-1] + example_action.shape[-1],
@@ -278,55 +290,18 @@ class FQL(nnx.Module):
         if config.debug:
             self.train_step = nnx.jit(self.train_step)
 
-    def _critic_loss(self, critic: Value, actor: Actor, batch, gamma: float):
-        obs = batch["observations"]
-        act = batch["actions"]
-        rew = batch["rewards"]
-        next_obs = batch["next_observations"]
-        mask = batch.get("masks", jnp.ones_like(rew))
+        additional_config = {
+            "obs_dims": example_observation.shape[1:],
+            "act_dim": example_action.shape[-1],
+        }
+        config = config.replace(**additional_config)
+        self.config = config
 
-        # Current Q
-        q_values, _ = critic(obs, act)  # (batch, 1, num_ensemble)
-
-        # Next actions (deterministic mean to avoid rng plumbing)
-        dist_next = actor(next_obs)
-        next_actions = dist_next.mean()
-        next_q_values, _ = critic(next_obs, next_actions)
-        next_q = next_q_values.min(axis=-1)  # conservative target
-
-        target_q = rew + gamma * mask * next_q
-        target_q = jax.lax.stop_gradient(target_q)
-
-        loss = jnp.mean((q_values - target_q) ** 2)
-        return loss
-
-    def _actor_loss(self, actor: Actor, critic: Value, batch):
-        obs = batch["observations"]
-        dist = actor(obs)
-        actions = dist.mean()
-        q_values, _ = critic(obs, actions)
-        q = q_values.mean(axis=-1)
-        return -jnp.mean(q)
-
-    def _vf_loss(self, vf: ActorVectorField, batch):
-        obs = batch["observations"]
-        act = batch["actions"]
-        batch_size, action_dim = act.shape
-
-        x_0 = jax.random.normal(self.rngs.random(), (batch_size, action_dim))
-        x_1 = act
-        t = jax.random.uniform(self.rngs.random(), (batch_size, 1))
-        x_t = (1 - t) * x_0 + t * x_1
-        vel = x_1 - x_0
-
-        v_pred, _ = vf(obs, x_t, times=t)
-        return jnp.mean((v_pred - vel) ** 2)
+    def critic_loss(self, batch):
+        next_actions = self.sample_actions(batch["next_observations"])
 
     def total_loss(self, batch: dict[str, jnp.ndarray]):
-        gamma = getattr(self.config, "gamma", 0.99)
-        critic_loss = self._critic_loss(self.critic, self.actor, batch, gamma)
-        actor_loss = self._actor_loss(self.actor, self.critic, batch)
-        vf_loss = self._vf_loss(self.vector_field, batch)
+        critic_loss, critic_info = self.critic_loss(batch)
         loss = critic_loss + actor_loss + vf_loss
         return loss, {
             "critic_loss": critic_loss,
@@ -357,7 +332,25 @@ class FQL(nnx.Module):
             "vf_loss": vf_loss,
         }
 
-    @nnx.jit
-    def sample_actions(self, obs, temperature=1.0):
-        dist = self.actor(obs, temperature=temperature)
-        return dist.sample(seed=self.rngs.random())
+    def train_multiple_steps_fql(
+        self,
+        dataset: Dataset,
+        num_steps: int,
+    ):
+        def body_fn(carry, _):
+            self = carry
+            batch = dataset.sample(self.config.batch_size)
+            metrics = self.train_step(batch)
+            return fql_state, metrics
+
+        # scan으로 num_steps 만큼 반복, 마지막 metrics만 사용
+        final_fql, stacked_metrics = jax.lax.scan(body_fn, fql, None, length=num_steps)
+        last_metrics = jax.tree_util.tree_map(lambda x: x[-1], stacked_metrics)
+        return final_fql, last_metrics
+
+    def sample_actions(self, observations, temperature=1.0):
+        noises = jax.random.normal(
+            self.rngs.random(),
+            (*observations.shape[: -len(self.config.obs_dims)], self.config.act_dim),
+        )
+        actions = self.

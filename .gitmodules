@@ -1,0 +1,3 @@
+[submodule "fql"]
+	path = fql
+	url = git@github.com:gwannuu/fql.git
